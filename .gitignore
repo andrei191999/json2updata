@@ -28,14 +28,19 @@ lerna-debug.log*
 # 4. App-specific generated / proprietary content
 ###############################################################################
 # Raw invoice inputs (all flavours)
-input*/
+input_*/
+input/*
+!input/.gitkeep
 input_local/
 # Batch outputs
-output/
+output/*
+!output/.gitkeep
 # Scratch data
-data/
+data/*
+!data/.gitkeep
 # CSV spec, YAML defaults, PDFs we ship separately
-resources/
+resources/*
+!resources/.gitkeep
 testing*.py
 tests/
 pyproject.toml
