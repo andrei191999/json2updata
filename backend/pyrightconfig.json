@@ -1,0 +1,7 @@
+{
+    "typeCheckingMode": "basic",
+    "reportOptionalMemberAccess": false,
+    "reportCallIssue": false,
+    "reportAttributeAccessIssue": false,
+    "reportAssignmentType": false
+}

@@ -1,0 +1,105 @@
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #535bf2;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: #646cff;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+  a:hover {
+    color: #747bff;
+  }
+  button {
+    background-color: #f9f9f9;
+  }
+}
+
+.row-required .MuiDataGrid-cell {
+  background-color: #fff7d6 !important;
+}
+.row-conditional .MuiDataGrid-cell {
+  background-color: #e7f5ff !important;
+}
+.row-guessed .MuiDataGrid-cell {
+  background-color: #e8fbe8 !important;
+}
+.row-parent-required .MuiDataGrid-cell {
+  background: #ede0ff !important;
+} /* lavender */
+.row-parent-optional .MuiDataGrid-cell {
+  background: #fff3e0 !important;
+} /* light orange */
+
+.row-hard .MuiDataGrid-cell:first-of-type::before {
+  content: "🛠";
+  margin-right: 4px;
+}
+
+.split {
+  touch-action: none; /* disable touch panning on the gutters */
+}
+
+.row-filename .MuiDataGrid-cell {
+  border-bottom: 2px solid #8884; /* subtle separator */
+  font-weight: 600; /* make it stand out */
+}
