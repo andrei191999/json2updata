@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from "react";
-import { useProgress, ProgressProvider } from "./components/ProgressContext";
+import { useProgress } from "./components/ProgressContext";
 import Split from "react-split";
 import { Box } from "@mui/material";
 import { api } from "./api";
@@ -15,7 +15,6 @@ import { toMappedObj } from "./utils/toMappedObj";
 import type { Override, MappingRow } from "./types/mapping";
 import { useMandatory } from "./hooks/useMandatory";
 import { useFolder } from "./hooks/useFolder";
-import { useFileSelection } from "./hooks/useFileSelection";
 import { batchTransform } from "./utils/batchTransform";
 import { debug } from "./utils/debug";
 import Snackbar from "@mui/material/Snackbar";
@@ -24,7 +23,7 @@ import MuiAlert from "@mui/material/Alert";
 export default function App() {
   /* ── 1) File list + current file ─────────────────────────────────────── */
   const { files, read: readJson, pick, folderHandle } = useFolder();
-  const { selected, toggle, selectAll, clearAll } = useFileSelection();
+  const [selectedSel, setSelectedSel] = useState<Set<string>>(new Set());
   const [level, setLevel] = useState<"fast" | "normal" | "deep">("normal");
   const [snack, setSnack] = useState<string | null>(null);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
@@ -66,6 +65,19 @@ export default function App() {
   const [keep, setKeep] = useState(false);
   const [loading] = useState(false);
   const [outDir, setOutDir] = useState<FileSystemDirectoryHandle | null>(null);
+  const toggle = useCallback((fname: string, on: boolean) => {
+    setSelectedSel((prev) => {
+      const next = new Set(prev);
+      on ? next.add(fname) : next.delete(fname);
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback((all: string[]) => {
+    setSelectedSel(new Set(all));
+  }, []);
+
+  const clearAll = useCallback(() => setSelectedSel(new Set()), []);
 
   /* 🚚 PDF / ZIP toggles ------------------------------------------ */
   const [packageOn, setPackageOn] = useState(true); // copy PDF next to XML
@@ -162,7 +174,7 @@ export default function App() {
 
   const handleBatch = () =>
     batchTransform(
-      selected,
+      Array.from(selectedSel),
       readJson,
       cache,
       folderHandle,
@@ -177,7 +189,7 @@ export default function App() {
         setBatchResults(res || []);
         setTab("summary");
         setSnack(
-          `Finished ${selected.length} file${selected.length > 1 ? "s" : ""}`
+          `Finished ${selectedSel.size} file${selectedSel.size > 1 ? "s" : ""}`
         );
       })
       .catch((err) => {
@@ -256,7 +268,7 @@ export default function App() {
             onLevel={setLevel}
             onPickDir={pick}
             onPickOutFolder={pickOutputDir}
-            selectedFiles={selected}
+            selectedSet={selectedSel}
             onToggleFile={toggle}
             selectAll={() => selectAll(files)}
             clearAll={clearAll}

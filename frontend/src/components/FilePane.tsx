@@ -1,18 +1,15 @@
 import {
   Toolbar,
   Button,
-  List,
-  ListItem,
-  ListItemIcon,
-  ListItemText,
   Box,
-  Checkbox,
   Typography,
   Switch,
   Select,
   MenuItem,
 } from "@mui/material";
+import { useLayoutEffect, useRef, useState } from "react";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import VirtualFileGrid from "./VirtualFileGrid";
 
 /* ──────────────────────────────────────────────────────────────── */
 /* Props – everything except `files` & `currentPreviewFile` is now OPTIONAL */
@@ -28,7 +25,7 @@ interface Props {
   onLevel?: (lv: "fast" | "normal" | "deep") => void;
 
   /* batch-mode (optional) */
-  selectedFiles?: string[];
+  selectedSet?: Set<string>;
   onToggleFile?: (fname: string, isChecked: boolean) => void;
 
   /* callbacks */
@@ -55,15 +52,29 @@ export default function FilePane({
   level = "normal",
   onToggleKeep = () => {},
   onLevel = () => {},
-  selectedFiles = [],
   onToggleFile = () => {},
   onPreviewFile,
+  selectedSet = new Set<string>(),
   onPickDir = () => {},
   onPickOutFolder = () => {},
   selectAll,
   clearAll = () => {},
   onBatch = () => {},
 }: Props) {
+  const handleToggle = onToggleFile;
+  /* ── measure container size so grid is responsive ─────────────── */
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
+
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() =>
+      setBoxSize({ w: el.clientWidth, h: el.clientHeight })
+    );
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   /* ─── render ──────────────────────────────────────────────────── */
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
@@ -86,10 +97,10 @@ export default function FilePane({
           size="small"
           variant="contained"
           sx={{ ml: "auto" }}
-          disabled={selectedFiles.length === 0}
+          disabled={selectedSet.size === 0}
           onClick={onBatch}
         >
-          Transform ({selectedFiles.length})
+          Transform ({selectedSet.size})
         </Button>
 
         <Select
@@ -121,56 +132,26 @@ export default function FilePane({
         (Check multiple for batch, click name to preview)
       </Typography>
 
-      <List
-        dense
+      <Box
         sx={{
           flex: 1,
-          overflow: "auto",
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          overflow: "hidden",
+          position: "relative",
         }}
+        ref={boxRef}
       >
-        {files.map((f) => {
-          const isPreview = f === currentPreviewFile;
-
-          return (
-            <ListItem
-              key={f}
-              disablePadding
-              sx={{
-                bgcolor: isPreview ? "rgba(0,0,200,0.1)" : "transparent",
-                "&:hover": {
-                  bgcolor: isPreview ? undefined : "rgba(0,0,0,0.04)",
-                },
-              }}
-            >
-              {/* Render checkbox only if batch-mode props provided */}
-              {selectedFiles && (
-                <ListItemIcon>
-                  <Checkbox
-                    edge="start"
-                    size="small"
-                    checked={selectedFiles.includes(f)}
-                    onChange={(e) => onToggleFile(f, e.target.checked)}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </ListItemIcon>
-              )}
-
-              <ListItemText
-                primary={f}
-                onClick={() => onPreviewFile(f)}
-                sx={{
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              />
-            </ListItem>
-          );
-        })}
-      </List>
+        {boxSize.h > 0 && (
+          <VirtualFileGrid
+            files={files}
+            height={boxSize.h}
+            width={boxSize.w}
+            current={currentPreviewFile}
+            selectedSet={selectedSet}
+            onToggle={handleToggle}
+            onPreview={onPreviewFile}
+          />
+        )}
+      </Box>
     </Box>
   );
 }

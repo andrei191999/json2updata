@@ -53,3 +53,38 @@ def sanitize_json(json_path: Path) -> Dict[str, Any]:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
 
     return cleaned
+
+if __name__ == "__main__":          # ───── simple CLI entry point
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description="Clean CMIS JSON files in bulk – replace ':' with '_' "
+                    "and write <file>.clean.json into ./output."
+    )
+    parser.add_argument(
+        "folder",
+        type=Path,
+        help="Folder to scan recursively for *.json files"
+    )
+
+    args = parser.parse_args()
+    root: Path = args.folder.expanduser().resolve()
+
+    if not root.is_dir():
+        sys.exit(f"[sanitizer] ❌  {root} is not a directory")
+
+    json_files = list(root.rglob("*.json"))
+    if not json_files:
+        sys.exit(f"[sanitizer] ⚠️  No .json files found under {root}")
+
+    print(f"[sanitizer] 🔍  Found {len(json_files)} JSON file(s) under {root}")
+    for jf in json_files:
+        try:
+            sanitize_json(jf)
+            print(f"[sanitizer]  ✅  {jf.relative_to(root)}")
+        except Exception as exc:
+            print(f"[sanitizer]  ⚠️  {jf}  —  {exc}")
+
+    print("[sanitizer] 🏁  Done.")
