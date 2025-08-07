@@ -8,4 +8,9 @@ PySide6
 fastapi~=0.111
 uvicorn[standard]~=0.29
 python-multipart~=0.0.9
-pydantic~=2.6
+aiofiles==23.2.1
+PyYAML==6.0.1
+pydantic==2.11.1
+pydantic-settings==2.2.1
+sentence-transformers==2.3.1      # optional – used by smart_suggester.py
+python-dateutil==2.9.0.post0
