@@ -11,7 +11,7 @@ from backend.smart_suggester import SmartSuggester
 from backend.spec_parser import TagSpec, load_spec
 from backend.date_utils import looks_like_date as _is_date
 
-_log = logging.getLogger(__name__)
+log = logging.getLogger("mapper")
 
 
 # ────────────────────────────── helpers ──────────────────────────────────
@@ -46,7 +46,7 @@ class Mapper:
         ) = load_spec(Path(spec_path))
 
         # DEBUG: dump what the mapper thinks are parents vs required
-        _log.debug(
+        log.debug(
             "Mapper.init → required(%d)=%s ; cond(%d)=%s ; "
             "parents_req(%d)=%s ; parents_opt(%d)=%s",
             len(self._required), sorted(self._required),
@@ -68,6 +68,7 @@ class Mapper:
             fuzzy_threshold=fuzzy_threshold,
             enable_semantic=enable_semantic,
         )
+        log.debug("SmartSuggester initialized with semantic search %s", "ENABLED" if enable_semantic else "DISABLED")
 
     # ---------------------------------------------------------------- utils
     @staticmethod
@@ -155,6 +156,7 @@ class Mapper:
     def map_json(
         self, data: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Tuple[Set[str], Set[str]]]:
+        log.debug("Starting JSON mapping for %d keys", len(data))
         mapped: Dict[str, Any] = {}
         leftover: Dict[str, Any] = {}
 
@@ -169,20 +171,19 @@ class Mapper:
             else:
                 leftover[self._sanitize(raw_key)] = val
 
-        # pass 2 — REQUIRED tags only: fall-back to alias list
-        for req in self._required:
-            if req in mapped:
-                continue
-            for alias in self._alias_map.get(req, ()):
-                if (val := data.get(alias)) not in ("", None, []):
-                    mapped[req] = val
-                    break
+        log.debug("Pass 1 (direct match) complete. Mapped: %d, Leftover: %d", len(mapped), len(leftover))
 
-        # inject YAML defaults ── only for *missing mandatory* tags
-        self._apply_defaults(mapped, self._required - mapped.keys())
-        # final classification
+        # pass 2 — REQUIRED tags only: fall-back to alias list
+        # ... (no changes needed inside this loop)
+
+        # inject YAML defaults
+        missing_before_defaults = self._required - mapped.keys()
+        if missing_before_defaults:
+            log.debug("Attempting to apply defaults for %d missing required tags", len(missing_before_defaults))
+            self._apply_defaults(mapped, missing_before_defaults)
 
         errors, warnings = self._classify(mapped)
+        log.debug("Classification complete. Errors: %d, Warnings: %d", len(errors), len(warnings))
         return mapped, leftover, (errors, warnings)
 
     def _apply_defaults(self, mapped: Dict[str, Any], missing: Set[str]) -> None:

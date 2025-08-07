@@ -9,18 +9,29 @@ import type { Override } from "../types/mapping";
 export function useMappingCache() {
   const [cache, setCache] = useState<MappingCache>({});
 
-  /** merge a single override patch into cache[file][tag] */
+  /** merge a single override patch into cache[file][tag]  (keeps xform, mode …) */
   const edit = useCallback(
     (file: string, tag: string, patch: Override, touchTemplate = false) =>
       setCache((prev) => {
+        const merged = {
+          ...(prev[file]?.[tag] ?? {
+            jsonKey: "",
+            include: true,
+            mode: "real",
+            value: "",
+          }),
+          ...patch,
+        };
+
         const next: MappingCache = {
           ...prev,
-          [file]: { ...prev[file], [tag]: patch },
+          [file]: { ...(prev[file] ?? {}), [tag]: merged },
         };
+
         if (touchTemplate) {
           next.__template__ = {
             ...(prev.__template__ ?? {}),
-            [tag]: patch,
+            [tag]: merged,
           };
         }
         return next;

@@ -19,7 +19,7 @@ from backend.spec_parser import load_spec
 from backend.date_utils import to_iso as _to_iso
 
 # ─── Module-level logger ──────────────────────────────────────────────
-_log = logging.getLogger(__name__)
+log = logging.getLogger("xml_builder")
 
 # ─── Constants & resources ────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +27,13 @@ RES  = ROOT / "resources"
 
 SPEC_CSV = RES / "updata-2.6.14.csv"
 XSD_PATH = RES / "updata-2.6.14.xsd"
+
+# compile XSD once instead of per-XML
+if XSD_PATH.exists():
+    _SCHEMA = ET.XMLSchema(ET.parse(str(XSD_PATH)))
+else:
+    _SCHEMA = None
+
 
 # CSV-derived helpers
 (_TAG_SPECS, *_REST, _ORDER_IDX) = load_spec(SPEC_CSV)
@@ -92,12 +99,7 @@ def build_updata_xml(
     mapped: Dict[str, Any],
     pdf_name: str | None = None,            # still supported
 ) -> bytes:
-    """
-    Convert *mapped* into pretty-printed Updata XML bytes.
-    """
-    _log.debug("building XML – %d mapped tags received", len(mapped))
-
-    # 1) <Updata version="…">
+    log.debug("Building XML from %d mapped tags", len(mapped))
     root = ET.Element("Updata", version="2.6.14")
     root_map: Dict[str, _Element] = {"_root": root}
 
@@ -115,7 +117,7 @@ def build_updata_xml(
             continue
 
         if _PATCH_RE.match(str(val)):
-            _log.debug("patch object leaked into mapped – %s: %s", tag_path, val)
+            log.debug("patch object leaked into mapped – %s: %s", tag_path, val)
             continue
 
         if "date" in tag_path.lower():
@@ -149,28 +151,27 @@ def build_updata_xml(
 
     # optional helper: default DocumentReferences when pdf_name provided
     if pdf_name and "DocumentReferences.DocumentReference" not in mapped:
+        log.debug("PDF name '%s' provided. Adding default DocumentReference.", pdf_name)
         dr = _ensure_path(root_map, "DocumentReferences.DocumentReference")
         dr.set("ref", "pdf")
         dr.text = pdf_name
 
     _apply_order(root)
+    xml_bytes = ET.tostring(root, encoding="utf-8", pretty_print=True, xml_declaration=True)
+    log.debug("XML serialization complete. Total size: %d bytes", len(xml_bytes))
+    return xml_bytes
 
-    # 5) Serialize (pretty print, declaration)
-    return ET.tostring(
-        root, encoding="utf-8", pretty_print=True, xml_declaration=True
-    )
-
-# ─────────────────── XML validation (lxml + XSD) ────────────────────
 def validate_xml(xml_bytes: bytes) -> None:
     """
     Validate the given XML bytes against the Updata 2.6.14 XSD.
     Raises ValueError if invalid; skips if XSD not found.
     """
     if not XSD_PATH.exists():
-        _log.warning("XSD %s not found – skipping validation", XSD_PATH)
+        log.warning("XSD not found at %s. Skipping XML validation.", XSD_PATH)
         return
 
-    schema = ET.XMLSchema(ET.parse(str(XSD_PATH)))
-    doc    = ET.fromstring(xml_bytes)
-    if not schema.validate(doc):
-        raise ValueError(schema.error_log.last_error)
+    if _SCHEMA and not _SCHEMA.validate(ET.fromstring(xml_bytes)):
+        log.error("XML Validation Failed: %s", _SCHEMA.error_log.last_error)
+        raise ValueError(_SCHEMA.error_log.last_error)
+
+    log.debug("XML validation successful against XSD.")

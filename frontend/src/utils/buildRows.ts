@@ -2,6 +2,7 @@ import type { MappingRow } from "../types/mapping";
 import type { Override } from "../types/mapping";
 import { categoriseRow } from "./categoriseRow";
 import { debug } from "./debug";
+import { applyTransformChain } from "../components/ValueTransformDialog";
 
 /**
  * Pure function: given JSON + backend guesses + user overrides,
@@ -25,13 +26,18 @@ interface Params {
 
 function reuseRow(prev: Map<string, MappingRow>, next: MappingRow): MappingRow {
   const old = prev.get(`${next.tag}::${next.id}`);
+  const sameXform =
+    (old?.xform?.length || 0) === (next.xform?.length || 0) &&
+    JSON.stringify(old?.xform) === JSON.stringify(next.xform);
+
   return old &&
     old.jsonKey === next.jsonKey &&
     old.value === next.value &&
     old.mode === next.mode &&
-    old.include === next.include
-    ? old // ← keep the same object
-    : next; // ← otherwise use the new one
+    old.include === next.include &&
+    sameXform
+    ? old // reuse → avoids needless re-renders
+    : next; // xform changed → return fresh object
 }
 
 export function buildRows(
@@ -86,6 +92,7 @@ export function buildRows(
         category,
         warning: r.warning,
         mode: r.mode ?? "real",
+        xform: r.xform,
       })
     );
   };
@@ -97,15 +104,26 @@ export function buildRows(
 
     // 1) user override → wins
     if (ov) {
-      const warning = ov.mode === ov.jsonKey && !(ov.jsonKey in json);
+      const warning = ov.mode === "pick" && !(ov.jsonKey in json);
+      /* raw before transform */
+      const raw =
+        ov.mode === "hard" ? ov.value : String(json[ov.jsonKey] ?? "");
+
+      /* final value shown in the grid */
+      const final =
+        ov.xform && ov.xform.length
+          ? applyTransformChain(ov.xform, raw, { json })
+          : raw;
+
       push({
         tag,
         jsonKey: ov.jsonKey,
         include: ov.include,
-        value: ov.mode === "hard" ? ov.value : String(json[ov.jsonKey] ?? ""),
+        value: final,
         touched: true,
         warning: warning ? true : false,
         mode: ov.mode,
+        xform: ov.xform, // ★ expose to the grid
       });
       return;
     }

@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from datetime import datetime, date, timezone
 from typing import Any, Optional
+from backend.logging_config import dbg, thread_local
+from backend.settings       import get_settings
+
+settings = get_settings()
+
 
 _RE_ISO_DATE   = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _RE_ISO_DT     = re.compile(r"^\d{4}-\d{2}-\d{2}T.*[Z+-].*$")
@@ -49,36 +54,50 @@ def to_iso(val: Any) -> Optional[str]:
     if len(s) == 8 and s.isdigit():
         # 1) try YYYYMMDD (e.g. 20250618)
         try:
-            return datetime.strptime(s, "%Y%m%d").date().isoformat()
+            result = datetime.strptime(s, "%Y%m%d").date().isoformat()
+            dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=result)
+            return result
         except ValueError:
             pass
         # 2) fallback DDMMYYYY (e.g. 25052004)
         try:
-            return datetime.strptime(s, "%d%m%Y").date().isoformat()
+            result = datetime.strptime(s, "%d%m%Y").date().isoformat()
+            dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=result)
+            return result
         except ValueError:
             pass
     if _RE_YYYYMMDD.match(s):
         try:
-            return datetime.strptime(s, "%Y%m%d").date().isoformat()
+            result = datetime.strptime(s, "%Y%m%d").date().isoformat()
+            dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=result)
+            return result
         except ValueError:
             return None
     if _RE_DDMMYYYY.match(s):
         try:
-            return datetime.strptime(s, "%d%m%Y").date().isoformat()
+            result = datetime.strptime(s, "%d%m%Y").date().isoformat()
+            dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=result)
+            return result
         except ValueError:
             return None
     if _RE_DDMMYY.match(s):
-        d = datetime.strptime(s, "%d%m%y").date()
-        if d.year < 1990:
+        date = datetime.strptime(s, "%d%m%y").date()
+        if date.year < 1990:
             return None
-        return d.isoformat()
+
+        dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=date.isoformat())
+        return date.isoformat()
 
     # fallback humane forms
     for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%m-%d-%Y"):
         try:
-            return datetime.strptime(s[:10], fmt).date().isoformat()
+            result = datetime.strptime(s[:10], fmt).date().isoformat()
+            dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=result)
+            return result
         except ValueError:
             pass
+    # no match
+    dbg("date_utils", "FAILED to parse date", value=val)
     return None
 
 

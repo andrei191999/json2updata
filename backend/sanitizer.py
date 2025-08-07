@@ -18,6 +18,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict
+from backend.logging_config import dbg, thread_local
+from backend.settings       import get_settings
+
+settings = get_settings()
+
 
 
 def _clean_keys(obj: Any) -> Any:
@@ -31,6 +36,8 @@ def _clean_keys(obj: Any) -> Any:
             clean_k = k.replace(":", "_")
             # later keys overwrite earlier duplicates (keep last-seen)
             new[clean_k] = _clean_keys(v)
+            if clean_k in new:
+                dbg("sanitizer", f"Key collision: {k}→{clean_k}, overwriting previous")
         return new
     if isinstance(obj, list):
         return [_clean_keys(i) for i in obj]
@@ -42,17 +49,24 @@ def sanitize_json(json_path: Path) -> Dict[str, Any]:
     Read the original JSON, clean it, save `<file>.clean.json` next
     to the original for transparency, and return the cleaned dict.
     """
-    with json_path.open(encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        thread_local.log_context_filename = json_path.name
+        dbg("sanitizer", "START sanitize_json", input=str(json_path))
 
-    cleaned = _clean_keys(data)
+        with json_path.open(encoding="utf-8") as f:
+            data = json.load(f)
 
-    clean_path = (json_path.parent.parent / "output" / f"{json_path.name}.clean.json")
-    clean_path.parent.mkdir(parents=True, exist_ok=True)
-    with clean_path.open("w", encoding="utf-8") as f:
-        json.dump(cleaned, f, ensure_ascii=False, indent=2)
+        cleaned = _clean_keys(data)
 
-    return cleaned
+        clean_path = (json_path.parent.parent / "output" / f"{json_path.name}.clean.json")
+        clean_path.parent.mkdir(parents=True, exist_ok=True)
+        with clean_path.open("w", encoding="utf-8") as f:
+            json.dump(cleaned, f, ensure_ascii=False, indent=2)
+
+        dbg("sanitizer", "WROTE clean JSON", clean_file=str(clean_path.relative_to(settings.OUTPUT_DIR)))
+        return cleaned
+    finally:
+        thread_local.log_context_filename = None
 
 if __name__ == "__main__":          # ───── simple CLI entry point
     import argparse

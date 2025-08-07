@@ -197,8 +197,8 @@ class SmartSuggester:
                             reason += " +semantic"
 
                 ranked.append((k, int(score)))
-                if _log.isEnabledFor(logging.DEBUG):
-                    _log.debug("  %-35s → %-30s : %3d  (%s)", k, tag, score, reason)
+                # if _log.isEnabledFor(logging.DEBUG):
+                #     _log.debug("  %-35s → %-30s : %3d  (%s)", k, tag, score, reason)
 
             out[tag] = sorted(ranked, key=lambda kv: -kv[1])[:top_n]
         return out

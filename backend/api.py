@@ -1,18 +1,42 @@
+"""
+FastAPI service for json→Updata conversions.
+────────────────────────────────────────────────────────────────────
+• Hash/Cache/Link PDF logic
+• /map, /build preview
+• /batch_build  ⇢  now chunked + multi-threaded
+• WebSocket progress streaming
+"""
+
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import gzip
+import hashlib
 import json
-import logging
+import os
+import shutil
+import zipfile
+import time
+import threading
+from datetime import datetime
+from functools import partial
 from enum import Enum
 from pathlib import Path
-import shutil
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Union, Set
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form, Body
+from fastapi import (
+    FastAPI, HTTPException, Query, Request, UploadFile, File, Form, Body,
+    Header, WebSocket, WebSocketDisconnect, Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from xml.dom import minidom
-from datetime import datetime
 
+# --- Modular Logging Import ---
+from backend.logging_config import setup_logging, set_event_loop, dbg, thread_local, LAST_LOGS
+from backend.settings import get_settings
 from backend.packager import package_pair
 from backend.mapper import Mapper
 from backend.xml_builder import build_updata_xml, validate_xml
@@ -25,52 +49,50 @@ from backend.spec_parser import (
     updata_parent_opt_tags,
 )
 
-# ───────────────────────────── logging ──────────────────────────────
-LOG_FILE = Path(__file__).with_name("updata_backend.log")
+# --- Initial Setup ---
+setup_logging() # Configure all logging handlers on import
+set_event_loop(asyncio.get_event_loop())
+settings = get_settings()
 
-logging.basicConfig(
-    level=logging.DEBUG,          # set INFO or WARNING in production
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
-        #logging.StreamHandler()   # ← remove for a fully silent console
-    ]
+# --- WebSocket state is owned exclusively by api.py ---
+DEBUG_SUBSCRIBERS: Set[asyncio.Queue] = set()
+DEBUG_LOCK: asyncio.Lock | None = None
+
+# ─────────────────────────── stateful progress ──────────────────────────
+PROGRESS:       dict[str, int] = {}   # { pid: done }
+PROGRESS_TOTAL: dict[str, int] = {}   # { pid: total }
+
+# ─── suggestion depth enum ───────────────────────────────────────────
+class SuggestLevel(str, Enum):
+    fast   = "fast"
+    normal = "normal"
+    deep   = "deep"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Capture the event loop, create the lock, and pass state to the logging module."""
+    global DEBUG_LOCK
+    loop = asyncio.get_running_loop()
+    set_event_loop(loop)
+    DEBUG_LOCK = asyncio.Lock()
+
+    # Make the subscribers list available to the logger via the event loop
+    setattr(loop, '_debug_subscribers', DEBUG_SUBSCRIBERS)
+
+    dbg("boot", f"Application startup complete. Event loop captured. PID: {os.getpid()}")
+    yield
+    dbg("boot", "Application shutdown.")
+
+# --- FastAPI App Instance ---
+app = FastAPI(title="json2updata-API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-def dbg(tag: str, *parts) -> None:
-    """
-    Flexible debug helper.
-
-    • dbg("batch", "using map for %s (%d keys)", fname, n)
-    • dbg("batch", fname, n)               ← auto-joins with spaces
-    """
-    log = logging.getLogger(tag)
-    if not parts:
-        return
-    if isinstance(parts[0], str) and "%" in parts[0]:
-        log.debug(parts[0], *parts[1:])
-    else:
-        log.debug(" ".join(map(str, parts)))
-
-
-def _pretty(xml_bytes: bytes, max_len: int = 4000) -> str:
-    pretty = minidom.parseString(xml_bytes).toprettyxml()
-    return pretty[: max_len] + "…" if len(pretty) > max_len else pretty
-
-
-# ───────────────────────────── paths ────────────────────────────────
-PROJECT_ROOT   = Path(__file__).resolve().parent.parent
-RESOURCES_DIR  = PROJECT_ROOT / "resources"
-# default folders – but can be overridden per-request
-DEFAULT_IN  = PROJECT_ROOT / "input"
-DEFAULT_OUT = PROJECT_ROOT / "output"
-DEFAULT_IN .mkdir(exist_ok=True)
-DEFAULT_OUT.mkdir(exist_ok=True)
-
-SPEC_CSV       = RESOURCES_DIR / "updata-2.6.14.csv"
-DEFAULTS_YAML  = RESOURCES_DIR / "defaults.yaml"
-
-# -- helper ----------------------------------------------------------
+# --- Helper Functions ---
 def _resolve_inside_project(folder: str | None, *, fallback: Path) -> Path:
     """
     Resolve *folder* under PROJECT_ROOT, preventing “..” escapades.
@@ -82,55 +104,112 @@ def _resolve_inside_project(folder: str | None, *, fallback: Path) -> Path:
         or folder == "__client__"
     ):
         return fallback
-    p = (PROJECT_ROOT / folder).resolve()
-    if PROJECT_ROOT not in p.parents:
+    p = (settings.PROJECT_ROOT / folder).resolve()
+    # A bit of a hack to allow paths inside the project root, should be fine for local dev
+    if settings.PROJECT_ROOT.as_posix() not in p.as_posix():
         raise HTTPException(400, f"Illegal folder path: {folder}")
     p.mkdir(exist_ok=True)
     return p
 
+def hash_fileobj(fobj):
+    h = hashlib.sha256()
+    for chunk in iter(lambda: fobj.read(8192), b""):
+        h.update(chunk)
+    fobj.seek(0)
+    return h.hexdigest()
+
+def _safe_unlink(p: Path) -> None:
+    """Retry-unlink on Windows to avoid WinError 32."""
+    for _ in range(3):
+        try:
+            p.unlink(missing_ok=True)
+            return
+        except PermissionError:      # file still in use → wait & retry
+            time.sleep(0.1)
+
+def _pretty(xml_bytes: bytes, max_len: int = 4000) -> str:
+    txt = minidom.parseString(xml_bytes).toprettyxml()
+    return txt[:max_len] + "…" if len(txt) > max_len else txt
+
 def make_mapper() -> Mapper:
-    return Mapper(
-        spec_path=SPEC_CSV,
-        defaults_path=DEFAULTS_YAML,
-        fuzzy_threshold=70,
-    )
+    return Mapper(spec_path=settings.SPEC_CSV, defaults_path=settings.DEFAULTS_YAML, fuzzy_threshold=70)
 
 CURRENT_MAPPER = make_mapper()
+# --- WebSocket Endpoints ---
+@app.websocket("/api/debug/stream")
+async def stream_debug_logs(websocket: WebSocket):
+    await websocket.accept()
+    log_queue = asyncio.Queue(maxsize=100)
 
-# ─── suggestion depth enum ───────────────────────────────────────────
-class SuggestLevel(str, Enum):
-    fast   = "fast"
-    normal = "normal"
-    deep   = "deep"
+    for past in LAST_LOGS:
+        await websocket.send_json(past)
+
+    # This check satisfies the type checker and adds runtime safety.
+    if DEBUG_LOCK is None:
+        dbg("websocket", "ERROR: DEBUG_LOCK was not initialized by the lifespan manager.")
+        await websocket.close(code=1011)
+        return
+
+    async with DEBUG_LOCK:
+        DEBUG_SUBSCRIBERS.add(log_queue)
+    dbg("websocket", f"Debug client connected. Total subscribers: {len(DEBUG_SUBSCRIBERS)}")
+
+    try:
+        while True:
+            log_data = await log_queue.get()
+            await websocket.send_json(log_data)
+            log_queue.task_done()
+    except WebSocketDisconnect:
+        dbg("websocket", "Debug client disconnected.")
+    finally:
+        if DEBUG_LOCK:
+            async with DEBUG_LOCK:
+                DEBUG_SUBSCRIBERS.remove(log_queue)
+            dbg("websocket", f"Cleaned up subscriber. Total subscribers: {len(DEBUG_SUBSCRIBERS)}")
 
 
-# ------------------------------------------------------------------ FastAPI
-app = FastAPI(title="json2updata-API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ───────────────────────── Web-Socket progress -‐ /api/stream/{pid} ─────
+@app.websocket("/api/stream/{pid}")
+async def stream_progress(ws: WebSocket, pid: str):
+    dbg("progress", f"Client connected for progress updates on PID: {pid}")
+    await ws.accept()
+    try:
+        last = -1
+        while True:
+            await asyncio.sleep(0.25)                        # 4 Hz
+            done, total = PROGRESS.get(pid, 0), PROGRESS_TOTAL.get(pid, 1)
+            if done != last:
+                await ws.send_json({"done": done, "total": total})
+                last = done
+            if done >= total:
+                await ws.close()
+                break
+    except WebSocketDisconnect:
+        pass
 
-# ------------------------------------------------------------------ routes
+
 @app.get("/api/files", response_model=List[str])
 def list_files(dir: str = Query(default="input")):
-    folder = (PROJECT_ROOT / dir).resolve()
+    dbg("api.files", f"Request to list files in directory: '{dir}'")
+    folder = (settings.PROJECT_ROOT / dir).resolve()
     if not folder.exists():
+        dbg("api.files", f"ERROR: Directory not found: {folder}")
         raise HTTPException(404, f"Folder not found: {folder}")
-    return sorted(f.name for f in folder.glob("*.json"))
+    files = sorted(f.name for f in folder.glob("*.json"))
+    dbg("api.files", f"Found {len(files)} JSON files in '{dir}'.")
+    return files
 
 @app.get("/api/file/{fname}")
 def get_file(fname: str, dir: str = Query(default="input")):
-    file_path = (PROJECT_ROOT / dir / fname).resolve()
+    file_path = (settings.PROJECT_ROOT / dir / fname).resolve()
     if not file_path.exists():
         raise HTTPException(404, "file not found")
     return FileResponse(str(file_path), media_type="application/json")
 
 @app.get("/api/spec")
 def get_spec():
-    return {
+    dbg("api.spec", "Request for API specification received.")
+    spec_data = {
         "tagList":      updata_tag_list,
         "orderMap":     updata_order_map,
         "required":     sorted(updata_required_tags),
@@ -138,47 +217,251 @@ def get_spec():
         "parentReq":      sorted(updata_parent_req_tags),
         "parentOpt":      sorted(updata_parent_opt_tags),
     }
+    dbg("api.spec", f"Returning spec with {len(updata_tag_list)} total tags.")
+    return spec_data
 
+# new route - check which hashes are missing
+@app.post("/api/pdf/need")
+async def pdf_need(hashes: list[str] = Body(...)):
+    missing = [h for h in hashes if not (settings.PDF_CACHE_DIR / f"{h}.pdf").exists()]
+    return {"missing": missing}
+
+@app.post("/api/pdf")
+async def pdf_upload(
+    file: UploadFile = File(...),
+    hash: str = Form(...),
+    dest: str = Form(...),
+    content_encoding: str | None = Header(None, alias="Content-Encoding"),
+):
+    """Store *one* canonical copy of the PDF, decompressing if the body was gzipped."""
+    target = settings.PDF_CACHE_DIR / f"{hash}.pdf"
+    if not target.exists():
+        # -- if the client set Content-Encoding we need to *de*compress --
+        sink = (
+            gzip.GzipFile(fileobj=file.file, mode="rb")
+            if content_encoding == "gzip"
+            else file.file
+        )
+        with target.open("wb") as out:
+            shutil.copyfileobj(sink, out)
+
+    # ------------------------------------------------------------------
+    # always (idempotently) create / refresh the hard-link that the
+    # batch builder will look for later
+    # ------------------------------------------------------------------
+    dest_dir = settings.PDF_WORK_DIR / dest        # “dest” is just the run-stamp
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if not file.filename:
+        raise HTTPException(400, "Uploaded file must have a filename")
+    link_path = dest_dir / file.filename
+    try:
+        if not link_path.exists():
+            os.link(target, link_path)
+    except (AttributeError, OSError):
+        # Windows on FAT / network shares → fall back to cheap copy
+        if not link_path.exists():
+            shutil.copy2(target, link_path)
+
+    return {"stored": True, "link": str(link_path.relative_to(settings.PROJECT_ROOT))}
+
+
+@app.post("/api/pdf/link")
+async def pdf_link(
+    hash: str = Form(...),
+    fname: str = Form(...),          # original file name, keeps extension/case
+    dest: str = Form(...),           # run-stamp sub-folder
+):
+    target = settings.PDF_CACHE_DIR / f"{hash}.pdf"
+    if not target.exists():
+        raise HTTPException(404, "cached copy missing")
+
+    dest_dir = settings.PDF_WORK_DIR / dest
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    link_path = dest_dir / fname
+    try:
+        if not link_path.exists():
+            os.link(target, link_path)
+    except (AttributeError, OSError):
+        if not link_path.exists():
+            shutil.copy2(target, link_path)   # Windows / cross-device
+
+    return {"linked": True, "path": str(link_path.relative_to(settings.PROJECT_ROOT))}
+
+# ─────────────────────────── /api/map ───────────────────────────────
 # ─────────────────────────── /api/map ───────────────────────────────
 @app.post("/api/map")
 def map_json(
-    payload: Dict[str, Any],
-    level: SuggestLevel = Query(SuggestLevel.normal,
-                                description="Suggestion depth"),
+    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    level: SuggestLevel = Query(SuggestLevel.normal, description="Suggestion depth"),
 ):
-    global CURRENT_MAPPER
-    CURRENT_MAPPER = make_mapper()          # stateless – rebuild each call
+    """
+    Maps a single JSON object or a list of JSON objects to the Updata format.
+    This uses a stateless mapper instance for each request.
+    """
+    # This function now correctly uses a helper to ensure the response
+    # structure is identical for both single and batch requests.
+    mapper = make_mapper()
 
-    mapped, leftover, (errors, warnings) = CURRENT_MAPPER.map_json(payload)
+    def _map_one(js: Dict[str, Any]):
+        """Helper to map a single JSON object and format the response."""
+        mapped, leftover, (errs, warns) = mapper.map_json(js)
+        suggest = mapper.suggest(js, level=level.value, top_n=5)
+        return {
+            "mapped":   mapped,
+            "leftover": leftover,
+            "suggest":  suggest,
+            "errors":   sorted(errs),
+            "warnings": sorted(warns),
+        }
 
-    suggest = CURRENT_MAPPER.suggest(payload, level=level.value, top_n=5)
+    is_batch = isinstance(payload, list)
+    count = len(payload) if is_batch else 1
+    dbg("api.map", f"Received mapping request for {count} document(s) with suggestion level '{level.value}'.")
 
-    dbg("map", "mapped %d keys, %d leftover", len(mapped), len(leftover))
+    if is_batch:
+        # Process each item in the list using the helper
+        results = [_map_one(js) for js in payload]
+        dbg("api.map", f"Completed batch mapping for {count} documents.")
+        return results
+    else:
+        # Process the single object
+        result = _map_one(payload)
+        dbg("api.map", f"Completed mapping. Mapped={len(result['mapped'])}, Leftover={len(result['leftover'])}")
+        return result
 
-    return {
-        "mapped":   mapped,
-        "leftover": leftover,
-        "suggest":  suggest,
-        "errors":   sorted(errors),
-        "warnings": sorted(warnings),
-    }
+# @app.post("/api/map")
+# def map_json(
+#     payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+#     level: SuggestLevel = Query(SuggestLevel.normal, description="Suggestion depth"),
+# ):
+#     global CURRENT_MAPPER
+#     CURRENT_MAPPER = make_mapper()  # stateless – rebuild each call
+
+#     # ――― helper to map ONE json ―――
+#     def _map_one(js: Dict[str, Any]):
+#         mapped, leftover, (errs, warns) = CURRENT_MAPPER.map_json(js)
+#         suggest = CURRENT_MAPPER.suggest(js, level=level.value, top_n=5)
+#         return {
+#             "mapped":   mapped,
+#             "leftover": leftover,
+#             "suggest":  suggest,
+#             "errors":   sorted(errs),
+#             "warnings": sorted(warns),
+#         }
+
+#     # list → list   dict → dict   (keep shape)
+#     if isinstance(payload, list):
+#         dbg("map", "batch size %d", len(payload))
+#         return [_map_one(js) for js in payload]
+
+#     mapped = _map_one(payload)
+#     dbg("map", "mapped %d keys, %d leftover", len(mapped["mapped"]), len(mapped["leftover"]))
+#     return mapped
+
+
+
+
 
 @app.post("/api/build")
 def build_xml_endpoint(data: Dict[str, Any]):
-    mapped = data.get("mapped", {})
-    dbg("build", "building XML for preview (%d keys)", len(mapped))
-
-    xml_bytes = build_updata_xml(data.get("mapped", {}))
-
+    mapped_data = data.get("mapped", {})
+    dbg("api.build", f"Received XML build request with {len(mapped_data)} mapped tags.")
+    xml_bytes = build_updata_xml(mapped_data)
     try:
         validate_xml(xml_bytes)
         valid, msg = "1", "ok"
-    except Exception as exc:               # noqa: BLE001
+        dbg("api.build", "XML validation successful.")
+    except Exception as exc:
         valid, msg = "0", str(exc)
+        dbg("api.build", f"ERROR: XML validation failed: {msg}")
 
     hdrs = {"X-Updata-Valid": valid, "X-Updata-Message": msg}
     return Response(xml_bytes, media_type="application/xml", headers=hdrs)
 
+
+# ─────────────────── NEW: worker function for one file ──────────────────
+def _build_one(
+    fname: str,
+    *,
+    in_dir: Path,
+    sub_dir_valid: Path,
+    sub_dir_invalid: Path,
+    template_ov: dict[str, Any],
+    overrides_all: dict[str, Any],
+    browser_map: dict[str, Any],
+    package_files: bool,
+    zip_pair: bool,
+) -> dict[str, Any]:
+    """Pure blocking code for exactly one JSON/PDF pair."""
+    # Set the filename in the thread's context
+    thread_local.log_context_filename = fname
+    try:
+        mapper = make_mapper()           # local instance (thread-safe)
+        t0 = datetime.now()
+        dbg("worker.build", f"START processing '{fname}'")
+
+        if fname in browser_map:
+            mapped = browser_map[fname]
+            errors, warnings = mapper._classify(mapped)
+            dbg("batchBuild", f"Using pre-mapped data from browser for '{fname}' ({len(mapped)} keys)")
+        else:
+            dbg("batchBuild", f"Reading and mapping '{fname}' from disk.")
+            with open(in_dir / fname, encoding="utf-8") as fh:
+                src_json = json.load(fh)
+            mapped, _, (errors, warnings) = mapper.map_json(src_json)
+
+        mapped = {**mapped}  # copy
+        # apply overrides
+        for tag, ov in template_ov.items():
+            if ov.get("include"):
+                mapped[tag] = ov.get("value", "")
+        for tag, ov in overrides_all.get(fname, {}).items():
+            if ov.get("include"):
+                mapped[tag] = ov.get("value", "")
+            else:
+                mapped.pop(tag, None)
+
+        stem       = Path(fname).stem
+        pdf_in     = in_dir / f"{stem}.pdf"    # exact, we already linked/cached
+        pdf_name   = mapped.get("DocumentReferences.DocumentReference", pdf_in.name)
+        if not pdf_name.lower().endswith(".pdf"):
+            pdf_name += ".pdf"
+
+        xml_bytes  = build_updata_xml(mapped, pdf_name)
+        try:
+            validate_xml(xml_bytes); valid, msg = True, "ok"
+        except Exception as exc:               # noqa: BLE001
+            valid, msg = False, str(exc)
+
+        sub_out    = sub_dir_valid if valid else sub_dir_invalid
+        xml_out    = sub_out / f"{Path(pdf_name).stem}.xml"
+        pdf_dest   = sub_out / pdf_name
+
+        xml_out.write_bytes(xml_bytes)
+        # PDF copy → ZIP → (optional) clean-up.
+        if package_files:
+            if not pdf_dest.exists():
+                shutil.copy2(pdf_in, pdf_dest)
+            if zip_pair:
+                package_pair(xml_out, pdf_dest, zip_pair=True, out_dir=sub_out)
+                _safe_unlink(xml_out)
+                _safe_unlink(pdf_dest)
+
+
+        dbg("worker.build", f"DONE processing '{fname}'. Valid={valid}, Tags={len(mapped)}, Time={(datetime.now() - t0).total_seconds():.3f}s")
+
+        return {
+            "file": fname,
+            "success": valid,
+            "xml": xml_bytes.decode(),
+            "warnings": sorted(warnings),
+            "errors": sorted(errors),
+            "validation": {"valid": valid, "message": msg},
+        }
+    finally:
+        # IMPORTANT: Clear the context when the worker is done
+        thread_local.log_context_filename = None
 
 # ──────────────────────────────────────────────────────────────────────────
 # ①  /api/save   – write one XML blob into ./output/<same-name>.xml
@@ -186,7 +469,7 @@ def build_xml_endpoint(data: Dict[str, Any]):
 def save_xml(data: Dict[str, Any]):
     if not data.get("fileName"):
         raise HTTPException(400, "fileName required")
-    out = DEFAULT_OUT / data["fileName"].replace(".json", ".xml")
+    out = settings.OUTPUT_DIR / data["fileName"].replace(".json", ".xml")
     out.write_text(data["xml"], "utf-8")
     dbg("save", "wrote %s", out.name)
     return {"ok": True, "path": str(out)}
@@ -197,7 +480,7 @@ def import_init(dest: str = Body(..., embed=True)):
     """
     Clear / create PROJECT_ROOT/<dest> so the browser can upload files there.
     """
-    dest_path = (PROJECT_ROOT / dest).resolve()
+    dest_path = (settings.PROJECT_ROOT / dest).resolve()
     if dest_path.exists():
         try:
             shutil.rmtree(dest_path)
@@ -209,12 +492,12 @@ def import_init(dest: str = Body(..., embed=True)):
 
 @app.get("/api/file_exists")
 def file_exists(dest: str = Query(...), name: str = Query(...)):
-    path = (PROJECT_ROOT / dest / name).resolve()
+    path = (settings.PROJECT_ROOT / dest / name).resolve()
     return {"exists": path.exists()}
 
 @app.post("/api/upload")
 def upload_file(file: UploadFile = File(...), dest: str = Form(...)):
-    dest_path = (PROJECT_ROOT / dest).resolve()
+    dest_path = (settings.PROJECT_ROOT / dest).resolve()
     dest_path.mkdir(parents=True, exist_ok=True)
     if not file.filename:
         raise HTTPException(400, "Uploaded file must have a filename")
@@ -241,11 +524,12 @@ def _apply_overrides(base: dict[str, Any],
     return merged
 
 @app.post("/api/batch_build")
-async def batch_build(request: Request):
+async def batch_build(request: Request, pid: str | None = Query(None, alias="pid")):
+
     body           = await request.json()
     file_names     = body["fileNames"]
-    in_dir        = _resolve_inside_project(body.get("inDir"),  fallback=DEFAULT_IN)
-    out_dir       = _resolve_inside_project(body.get("outDir"), fallback=DEFAULT_OUT)
+    in_dir        = _resolve_inside_project(body.get("inDir"),  fallback=settings.INPUT_DIR)
+    out_dir       = _resolve_inside_project(body.get("outDir"), fallback=settings.OUTPUT_DIR)
 
     overrides_all  = body.get("overrides", {})
     template_ov    = overrides_all.get("__template__", {})
@@ -260,137 +544,64 @@ async def batch_build(request: Request):
     (run_out_dir / "valid").mkdir(parents=True, exist_ok=True)
     (run_out_dir / "invalid").mkdir(parents=True, exist_ok=True)
 
-    dbg("batchBuild", "incoming %d files)", len(file_names))
 
-    results: List[Dict[str, Any]] = []
+    dbg("api.batch", f"Received batch build request for {len(file_names)} files. PID: {pid}")
 
-    for fname in file_names:
-        try:
-            # ── 1) get a mapping ───────────────────────────────────
-            if fname in browser_map:                       # fast path
-                mapped   = browser_map[fname]
-                errors, warnings = CURRENT_MAPPER._classify(mapped)
-                dbg("batchBuild", "[%s] browser map (%d keys)", fname, len(mapped))
-            else:                                          # need the raw JSON
-                try:
-                    with open(in_dir / fname, "r", encoding="utf-8") as fh:
-                        src_json = json.load(fh)
-                except Exception as exc:
-                    results.append({"file": fname, "success": False,
-                                    "error": f"cannot read {fname}: {exc}"})
-                    continue
+     # ------------------------------------------------------------------
+    # build in settings.CHUNK_SIZE slices, each processed in parallel
+    # ------------------------------------------------------------------
+    results: list[dict[str, Any]] = []
+    if pid:
+        PROGRESS_TOTAL[pid] = len(file_names)
+        PROGRESS[pid]       = 0
 
-                mapped, _, (errors, warnings) = CURRENT_MAPPER.map_json(src_json)
-                dbg("batchBuild", "[%s] auto map (%d keys)", fname, len(mapped))
+    loop        = asyncio.get_running_loop()
+    sub_valid   = run_out_dir / "valid"
+    sub_invalid = run_out_dir / "invalid"
 
-            # 3) apply global + file overrides
-            mapped = _apply_overrides(mapped, template_ov)
-            mapped = _apply_overrides(mapped, overrides_all.get(fname, {}))
-            dbg("batchBuild", "[%s] FINAL %d keys", fname, len(mapped))
+    for start in range(0, len(file_names), settings.CHUNK_SIZE):
+        chunk = file_names[start : start + settings.CHUNK_SIZE]
+        chunk_no = start // settings.CHUNK_SIZE + 1
+        dbg("chunk", f"▶ chunk {chunk_no} – {len(chunk)} files")
+        chunk_t0 = datetime.now()
 
-            errors, warnings = CURRENT_MAPPER._classify(mapped)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=settings.MAX_PARALLEL) as pool:
+            tasks = [
+                loop.run_in_executor(
+                    pool,
+                    partial(
+                        _build_one,
+                        fname,
+                        in_dir=in_dir,
+                        sub_dir_valid=sub_valid,
+                        sub_dir_invalid=sub_invalid,
+                        template_ov=template_ov,
+                        overrides_all=overrides_all,
+                        browser_map=browser_map,
+                        package_files=package_files,
+                        zip_pair=zip_pair,
+                    ),
+                )
+                for fname in chunk
+            ]
 
-            # 3b) locate the PDF – _really_ robust this time
-            stem = Path(fname).stem
-            dbg("pdfSearch", "[%s] looking in %s (exists=%s)", fname, in_dir, in_dir.exists())
-            dbg("pdfSearch","[%s] dir=%s  --- contains %s",fname,in_dir,[p.name for p in in_dir.iterdir()],)
+            # gather as they complete → steady progress updates
+            for coro in asyncio.as_completed(tasks):
+                res = await coro
+                results.append(res)
+                if pid:
+                    PROGRESS[pid] += 1        # pushes to Web-Socket
 
-
-
-            pdf_in: Path | None = None
-
-            # ① quick exact check (fast path)
-            exact = in_dir / f"{stem}.pdf"
-            if exact.exists():
-                pdf_in = exact
-            else:
-                # ② fall back: recurse **any depth**, case-insensitive
-                for p in in_dir.rglob("*"):
-                    if p.is_file() and p.suffix.lower() == ".pdf" and p.stem.lower() == stem.lower():
-                        pdf_in = p
-                        break
-
-            if pdf_in is None:
-                dbg("pdfSearch", "[%s] NO match – dir has %d PDFs",
-                    fname, len(list(in_dir.glob('*.pdf'))))
-                raise FileNotFoundError(f"missing PDF: {stem}.pdf")
-
-
-            dbg("pdfSearch", "scanned %d files under %s", len(list(in_dir.rglob('*'))), in_dir)
-            dbg("pdfSearch", "[%s] resolved to %s", fname, pdf_in.name)
-
-            # 4) final PDF name = mapping override or fallback
-            pdf_name = mapped.get(
-                "DocumentReferences.DocumentReference",
-                pdf_in.name,                 # fallback → invoice-123.pdf
-            )
-            # ensure extension
-            if not pdf_name.lower().endswith(".pdf"):
-                pdf_name += ".pdf"
-
-            # 4) generate XML  →  bytes
-            xml_bytes = build_updata_xml(mapped, pdf_name=pdf_name)
-
-            # 5) validate once per file
-            try:
-                validate_xml(xml_bytes)
-                valid, msg = True, "ok"
-            except Exception as exc:
-                valid, msg = False, str(exc)
-                dbg("batchBuild", "XML validation failed for %s: %s", fname, exc)
-
-            # always send *string* to the browser so TS side is simple
-            xml_str = xml_bytes.decode("utf-8")
-
-            # ── 6) decide target sub-folder (valid / invalid) ──────
-            sub_dir = run_out_dir / ("valid" if valid else "invalid")
-
-            stem      = Path(pdf_name).stem
-            pdf_dest  = sub_dir / pdf_name
-            xml_out   = sub_dir / f"{stem}.xml"
-
-            # write XML to disk
-            xml_out.write_text(xml_str, encoding="utf-8")
-
-            if package_files:
-                # ensure PDF on disk under the right name
-                if not pdf_dest.exists():
-                    shutil.copy2(pdf_in, pdf_dest)
-
-                if zip_pair:
-                    package_pair(
-                        xml_file=xml_out,
-                        pdf_file=pdf_dest,
-                        zip_pair=True,
-                        out_dir=sub_dir,
-                    )
-                    # tidy up loose copies
-                    xml_out.unlink(missing_ok=True)
-                    pdf_dest.unlink(missing_ok=True)
-                dbg("batchPkg", "[%s] packaged → %s",
-                    fname, sub_dir.relative_to(run_out_dir))
-
-            results.append({
-                "file": fname,
-                "success": valid,
-                "xml": xml_str,
-                "prettyXml": _pretty(xml_bytes),
-                "validation": {"valid": valid, "message": msg},
-                "warnings":  sorted(warnings),
-                "errors":    sorted(errors),
-                "meta": {
-                    "mapped":   len(mapped),
-                    "required": len(updata_required_tags),
-                    "size":     f"{len(xml_bytes):,} bytes",
-                },
-            })
-        except Exception as exc:
-            results.append(
-                {"file": fname, "success": False, "error": str(exc)}
-            )
+            # finished one chunk -------------------------------------------
+            dbg("chunk", f"✓ chunk {chunk_no} finished "
+                        f"in {datetime.now() - chunk_t0} "
+                        f"(total results={len(results)})")
 
     dbg("batch", "DONE – %d OK / %d failed",
         sum(r["success"] for r in results),
         sum(not r["success"] for r in results))
+
+    if pid:
+        PROGRESS[pid] = PROGRESS_TOTAL.get(pid, 0)
 
     return {"results": results}

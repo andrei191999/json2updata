@@ -1,10 +1,4 @@
-import {
-  createContext,
-  useContext,
-  useState,
-  useCallback,
-  type ReactNode,
-} from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import {
   Backdrop,
   Box,
@@ -28,7 +22,9 @@ interface ProgressState {
 export interface ProgressAPI {
   /** reset & show bar */
   start: (totalSteps: number, firstLabel?: string) => void;
-  /** +1 step (or arbitrary pct) */
+  setLabel: (label: string) => void;
+  /** change total steps on the fly */
+  setTotal: (totalSteps: number, label?: string) => void;
   step: (label?: string, inc?: number) => void;
   /** call when everything OK */
   done: (finalLabel?: string) => void;
@@ -38,6 +34,7 @@ export interface ProgressAPI {
   dismiss: () => void;
   /** true while visible */
   active: boolean;
+  cur: number;
 }
 
 const Ctx = createContext<ProgressAPI | null>(null);
@@ -54,15 +51,26 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
 
   /* helpers */
   const start: ProgressAPI["start"] = (total, first = "") =>
-    setState({ pct: 0, label: first, mode: "running", max: total, cur: 0 });
+    setState({
+      pct: total ? 0 : -1, // indeterminate if 0
+      label: first,
+      mode: "running",
+      max: total,
+      cur: 0,
+    });
+
+  /* update label only ------------------------------------------------ */
+  const setLabel: ProgressAPI["setLabel"] = (lbl) =>
+    setState((s) => ({ ...s, label: lbl }));
 
   const step: ProgressAPI["step"] = (lbl = "", inc = 1) =>
     setState((s) => {
+      if (s.mode !== "running") return s;
       const cur = Math.min(s.cur + inc, s.max);
       return {
         ...s,
         cur,
-        pct: (cur / s.max) * 100,
+        pct: s.max ? (cur / s.max) * 100 : -1,
         label: lbl || s.label,
       };
     });
@@ -75,6 +83,14 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
     );
   };
 
+  const setTotal: ProgressAPI["setTotal"] = (total, lbl) =>
+    setState((s) => ({
+      ...s,
+      max: total,
+      pct: (s.cur / total) * 100,
+      label: lbl ?? s.label,
+    }));
+
   const error: ProgressAPI["error"] = (msg) =>
     setState({ pct: -1, label: msg, mode: "error", max: 1, cur: 0 });
 
@@ -83,11 +99,14 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
 
   const api: ProgressAPI = {
     start,
+    setLabel,
+    setTotal,
     step,
     done,
     error,
     dismiss,
     active: state.mode !== "idle",
+    cur: state.cur,
   };
 
   /* UI colours */

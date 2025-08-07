@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { useProgress } from "./components/ProgressContext";
+import DebugConsole from "./components/DebugConsole";
 import Split from "react-split";
 import { Box } from "@mui/material";
 import { api } from "./api";
@@ -19,6 +20,9 @@ import { batchTransform } from "./utils/batchTransform";
 import { debug } from "./utils/debug";
 import Snackbar from "@mui/material/Snackbar";
 import MuiAlert from "@mui/material/Alert";
+import BugReportIcon from "@mui/icons-material/BugReport";
+import Tooltip from "@mui/material/Tooltip";
+import IconButton from "@mui/material/IconButton";
 
 export default function App() {
   /* ── 1) File list + current file ─────────────────────────────────────── */
@@ -64,6 +68,7 @@ export default function App() {
   /* ── 5) UI toggles ───────────────────────────────────────────────────── */
   const [keep, setKeep] = useState(false);
   const [loading] = useState(false);
+  const [debugConsoleOpen, setDebugConsoleOpen] = useState(false);
   const [outDir, setOutDir] = useState<FileSystemDirectoryHandle | null>(null);
   const toggle = useCallback((fname: string, on: boolean) => {
     setSelectedSel((prev) => {
@@ -222,6 +227,11 @@ export default function App() {
       <Box sx={{ display: "flex", gap: 2, p: 1 }}>
         <button onClick={() => setTab("map")}>Mapping</button>
         <button onClick={() => setTab("summary")}>Summary</button>
+        <Tooltip title="Debug console">
+          <IconButton onClick={() => setDebugConsoleOpen(true)}>
+            <BugReportIcon />
+          </IconButton>
+        </Tooltip>
         {/* NEW — simple toggles, move elsewhere later if you like */}
         <label style={{ marginLeft: 12 }}>
           <input
@@ -326,6 +336,10 @@ export default function App() {
           {snack}
         </MuiAlert>
       </Snackbar>
+      <DebugConsole
+        open={debugConsoleOpen}
+        onClose={() => setDebugConsoleOpen(false)}
+      />
     </>
   );
   /* #endregion */
