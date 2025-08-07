@@ -1,7 +1,4 @@
 import React, { useEffect, useMemo, useState } from "react";
-// bring in the debugging helper. This wrapper emits messages via console.debug
-// when window.DEBUG is enabled (boolean or array of scopes). See debug.ts.
-import { debug } from "./debug";
 import {
   Dialog,
   DialogTitle,
@@ -16,6 +13,7 @@ import {
   Autocomplete,
 } from "@mui/material";
 import { Delete, Plus } from "lucide-react";
+import { debug } from "../utils/debug";
 
 /* -------------------------------------------------------------------------- */
 /*  1. Mini‑DSL  – simplified concat, smarter token substitution              */
@@ -353,19 +351,7 @@ export default function ValueTransformDialog({
     [chain, rawValue, json]
   );
 
-  // Emit a debug message whenever the preview value changes. This allows you
-  // to see how edits to the transform chain affect the computed value.
-  useEffect(() => {
-    debug("ValueTransformDialog/preview", "preview updated", preview);
-  }, [preview]);
-
-  const addStep = () =>
-    setChain((c) => {
-      const next = [...c, { kind: "substr", start: 0 }];
-      // Debugging: capture the new chain state after adding a step.
-      debug("ValueTransformDialog/addStep", "chain after add", next);
-      return next;
-    });
+  const addStep = () => setChain((c) => [...c, { kind: "substr", start: 0 }]);
   const updateStep = (idx: number, s: SingleTransform) =>
     setChain((c) => {
       const next = c.map((step, i) => (i === idx ? s : step));

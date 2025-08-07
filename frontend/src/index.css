@@ -95,6 +95,10 @@ button:focus-visible {
   margin-right: 4px;
 }
 
+.debug-drag-handle {
+  cursor: move;
+}
+
 .split {
   touch-action: none; /* disable touch panning on the gutters */
 }

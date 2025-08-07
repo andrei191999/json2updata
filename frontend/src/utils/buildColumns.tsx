@@ -1,6 +1,9 @@
 import type { GridColDef } from "@mui/x-data-grid";
 import { Checkbox, Tooltip, Box } from "@mui/material";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import EditIcon from "@mui/icons-material/Edit";
+import IconButton from "@mui/material/IconButton";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 
 import IncludeCell from "../components/edit/IncludeCell";
 import JsonFieldEditCell from "../components/edit/JsonFieldEditCell";
@@ -29,6 +32,7 @@ interface BuildOpts {
   onEdit: (tag: string, patch: Override, touchTemplate?: boolean) => void;
 
   visibleRows: MappingRow[];
+  openEditor: (row: MappingRow) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -45,6 +49,7 @@ export function buildColumns({
   suggest,
   onEdit,
   visibleRows,
+  openEditor,
 }: BuildOpts): GridColDef[] {
   debug("[buildColumns] rebuilding — includeState =", includeState);
 
@@ -134,6 +139,34 @@ export function buildColumns({
           onEdit={onEdit}
         />
       ),
+    },
+
+    /* 4½  Launch overlay editor ------------------------------------ */
+    {
+      field: "xform",
+      headerName: "",
+      width: 68,
+      sortable: false,
+      filterable: false,
+      disableColumnMenu: true,
+      renderCell: (p) => {
+        const edited = (p.row as MappingRow).xform?.length;
+        return (
+          <IconButton
+            size="small"
+            onClick={(e) => {
+              e.stopPropagation();
+              openEditor(p.row as MappingRow);
+            }}
+          >
+            {edited ? (
+              <CheckCircleIcon fontSize="small" color="success" />
+            ) : (
+              <EditIcon fontSize="small" color="action" />
+            )}
+          </IconButton>
+        );
+      },
     },
 
     /* 5️⃣  Include checkbox ----------------------------------------- */

@@ -18,41 +18,7 @@ import { applyMapping } from "./applyMapping";
 import { debug } from "./debug";
 import type { MappingCache, Override } from "../types/mapping";
 import type { ProgressAPI } from "../components/ProgressContext";
-
-/* ───────────── helper: does backend already have <dest>/<name>? */
-async function backendHas(
-  api: AxiosInstance,
-  dest: string,
-  name: string
-): Promise<boolean> {
-  const { data } = await api.get("/file_exists", { params: { dest, name } });
-  return Boolean(data.exists);
-}
-
-/* ───────────── helper: upload File → backend:/upload if needed */
-async function uploadPdfIfNeeded(
-  api: AxiosInstance,
-  folder: FileSystemDirectoryHandle,
-  pdfName: string,
-  dest: string
-) {
-  if (await backendHas(api, dest, pdfName)) {
-    debug("batchTransform", `↳ skip (already on server) ${pdfName}`);
-    return;
-  }
-
-  try {
-    const handle = await folder.getFileHandle(pdfName);
-    const file = await handle.getFile();
-    const fd = new FormData();
-    fd.append("file", file, pdfName);
-    fd.append("dest", dest);
-    await api.post("/upload", fd);
-    debug("batchTransform", `↑ uploaded ${pdfName}`);
-  } catch {
-    throw new Error(`PDF not found locally: ${pdfName}`);
-  }
-}
+import { v4 as uuidv4 } from "uuid";
 
 /* ───────────── result type sent back to callers  */
 interface Result {
@@ -64,141 +30,258 @@ interface Result {
 
 export async function batchTransform(
   fileNames: string[],
-  readJson: (name: string) => Promise<Record<string, unknown>>,
+  readJson: (n: string) => Promise<Record<string, unknown>>,
   cache: MappingCache,
-  folderHandle: FileSystemDirectoryHandle | null, // local folder for PDFs
-  outDir: FileSystemDirectoryHandle | null, // optional local XML out
+  folderHandle: FileSystemDirectoryHandle | null,
+  outDir: FileSystemDirectoryHandle | null,
   api: AxiosInstance,
   level: "fast" | "normal" | "deep" = "normal",
   packageOn = true,
   zipPair = false,
   progress?: ProgressAPI
 ): Promise<Result[]> {
-  debug("batchTransform", "▶ start –", fileNames.length, "files");
-
-  // create a no-op fallback if progress not provided
-  const silent: ProgressAPI = {
+  /* ──────────────────────────────────────────────────────────────────── */
+  const pr = progress ?? {
     start: () => {},
+    setLabel: () => {},
+    setTotal: () => {},
     step: () => {},
     done: () => {},
     error: () => {},
     dismiss: () => {},
     active: false,
+    cur: 0,
   };
-  const pr = progress ?? silent;
-  pr.start(3 + fileNames.length, "Mapping JSON → Updata");
-  if (fileNames.length === 0) return [];
 
-  const STAGING = "input_local"; // backend workspace for PDFs/JSONs
+  const CORES = navigator.hardwareConcurrency || 4;
+  const CONC_HASH = Math.min(16, CORES);
+  const MAX_UP = Math.min(128, CORES * 4);
 
-  /* 1 ─ fetch Updata spec once  */
+  /* ➊ pick the run-stamp **before** hashing / uploading */
+  const destDirName = Date.now().toString(36); // e.g. kolgxq
+  const destDir = `pdf_storage/pdf_hard_links/${destDirName}`;
+
   const { data: specCtx } = await api.get("/spec");
   debug("batchTransform", "spec loaded");
 
-  /* 2 ─ map each JSON locally, collect overrides  */
-  const browserMapped: Record<string, Record<string, unknown>> = {};
+  /* ------------------------------------------------------------------
+   *  A.  Map every JSON  (100-item slices, runs fully in RAM)
+     ------------------------------------------------------------------ */
+  const MAP_SLICE = 100;
+  pr.start(fileNames.length, "Mapping JSON → Updata");
 
-  for (const fname of fileNames) {
-    const json = await readJson(fname);
-    const { data: mapData } = await api.post(`/map?level=${level}`, json);
+  const browserMapped: Record<string, any> = {};
 
-    const rows = buildRows(undefined, {
-      json,
-      backendMapped: mapData.mapped,
-      backendSuggest: mapData.suggest,
-      overrides: {
-        ...(cache.__template__ ?? {}),
-        ...(cache[fname] ?? {}),
-      } as Record<string, Override>,
-      tagList: specCtx.tagList,
-      orderMap: specCtx.orderMap,
-      required: new Set(specCtx.required),
-      conditional: new Set(specCtx.conditional),
-      parentReq: new Set(specCtx.parentReq),
-      parentOpt: new Set(specCtx.parentOpt),
+  for (let i = 0; i < fileNames.length; i += MAP_SLICE) {
+    const names = fileNames.slice(i, i + MAP_SLICE);
+    const jsonArr = await Promise.all(names.map(readJson));
+
+    const { data: mappedArr } = await api.post(`/map?level=${level}`, jsonArr);
+
+    mappedArr.forEach((mapData: any, idx: number) => {
+      const fname = names[idx];
+      const rows = buildRows(undefined, {
+        json: jsonArr[idx],
+        backendMapped: mapData.mapped,
+        backendSuggest: mapData.suggest,
+        overrides: {
+          ...(cache.__template__ ?? {}),
+          ...(cache[fname] ?? {}),
+        } as Record<string, Override>,
+        tagList: specCtx.tagList,
+        orderMap: specCtx.orderMap,
+        required: new Set(specCtx.required),
+        conditional: new Set(specCtx.conditional),
+        parentReq: new Set(specCtx.parentReq),
+        parentOpt: new Set(specCtx.parentOpt),
+      });
+      browserMapped[fname] = applyMapping(rows).mapped;
+      pr.step();
     });
+  }
+  pr.done(); // mapping finished
 
-    const { mapped } = applyMapping(rows);
-    browserMapped[fname] = mapped;
-    debug(
-      "batchTransform",
-      `[map] ${fname} →`,
-      Object.keys(mapped).length,
-      "tags"
-    );
+  /* ------------------------------------------------------------------
+   *  B.  Hash + gzip PDFs in 1 000-file “waves”
+     ------------------------------------------------------------------ */
+  if (!folderHandle) {
+    debug("batchTransform", "⚠ no folder handle – assume PDFs on server");
   }
 
-  /* 2-b ─ upload each needed PDF once  */
-  if (folderHandle) {
-    debug("batchTransform", "⏫ ensuring PDFs on backend");
-    for (const fname of fileNames) {
-      const stem = fname.replace(/\.json$/i, "");
-      const pdf = `${stem}.pdf`; // original disk name
-      await uploadPdfIfNeeded(api, folderHandle, pdf, STAGING);
-      pr.step("Uploading PDFs");
-    }
+  /* -------------------- hashing pool (re-used for all waves) -------------------- */
+  const workerPool = Array.from(
+    { length: CONC_HASH },
+    () =>
+      new Worker(new URL("../workers/hashGzipWorker.ts", import.meta.url), {
+        type: "module",
+      })
+  );
+
+  const pdfMeta: { name: string; hash: string; gz: Blob }[] = [];
+  const pdfMap = new Map<string, { name: string; gz: Blob }>();
+  const WAVE = 500;
+  pr.start(fileNames.length, "Hash+Gzip PDFs");
+
+  // simple semaphore array to cap workers
+  const sem: Promise<void>[] = Array(CONC_HASH).fill(Promise.resolve());
+
+  for (let w = 0; w < fileNames.length; w += WAVE) {
+    const waveNames = fileNames
+      .slice(w, w + WAVE)
+      .map((n) => n.replace(/\.json$/i, ".pdf"));
+
+    await Promise.all(
+      waveNames.map(
+        (pdfName, idx) =>
+          (sem[idx % CONC_HASH] = sem[idx % CONC_HASH].then(async () => {
+            /* ---------------- one worker job ---------------- */
+            const hFile = await folderHandle!.getFileHandle(pdfName);
+            const file = await hFile.getFile();
+
+            const worker = workerPool[idx % CONC_HASH];
+
+            const res = await new Promise<any>(async (r, j) => {
+              worker.onmessage = ({ data }) =>
+                data.error ? j(data.error) : r(data);
+              const buf = await file.arrayBuffer();
+              worker.postMessage(buf, [buf]);
+            });
+
+            const gzFile = new File([res.gzBuf], pdfName, {
+              type: "application/gzip",
+            });
+
+            pdfMeta.push({ name: pdfName, hash: res.hash, gz: gzFile });
+            pdfMap.set(res.hash, { name: pdfName, gz: gzFile });
+
+            pr.step();
+          }))
+      )
+    );
+  }
+  pr.done();
+
+  /* ------------------------------------------------------------------
+   *  C.  Upload only the missing PDFs
+     ------------------------------------------------------------------ */
+  pr.start(pdfMeta.length, "Uploading PDFs");
+
+  // ask server which hashes it lacks
+  const missing: string[] = [];
+  for (let i = 0; i < pdfMeta.length; i += 2_000) {
+    const slice = Array.from(pdfMap.keys()).slice(i, i + 2_000);
+    const { data } = await api.post("/pdf/need", slice);
+    missing.push(...data.missing);
+  }
+
+  pr.setTotal(missing.length || 1);
+
+  if (missing.length === 0) {
+    pr.done("Uploads skipped");
   } else {
-    debug(
-      "batchTransform",
-      "⚠ no folder handle – PDFs must already be on server"
+    const queue = [...missing];
+    await Promise.all(
+      Array.from({ length: MAX_UP }, async () => {
+        while (queue.length) {
+          const hash = queue.pop()!;
+          const p = pdfMap.get(hash)!;
+
+          const fd = new FormData();
+          /* wrap the compressed bytes in a proper File – carries a filename */
+          const gzFile = new File([p.gz], p.name, { type: "application/gzip" });
+          fd.append("file", gzFile);
+          fd.append("hash", hash);
+          fd.append("dest", destDirName);
+
+          await api.post("/pdf", fd, {
+            headers: { "Content-Type": "multipart/form-data" },
+            onUploadProgress: (e) => {
+              if (e.loaded === e.total) pr.step();
+            },
+          });
+        }
+      })
     );
+    pr.done("Uploads done");
   }
 
-  /* helper – write XML locally (optional) */
-  const writeXmlLocally = async (file: string, xml: string) => {
+  /* ------------------------------------------------------------------
+   *  D.  Link every PDF on the server
+     ------------------------------------------------------------------ */
+  pr.start(pdfMeta.length, "Linking PDFs");
+
+  await Promise.all(
+    pdfMeta.map((p) => {
+      const body = new URLSearchParams({
+        hash: p.hash,
+        fname: p.name,
+        dest: destDirName,
+      }).toString(); // <- serialise!
+
+      return api
+        .post("/pdf/link", body, {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        })
+        .catch((e) => debug("link-fail", p.name, e.response?.data ?? e.message))
+        .then(() => pr.step());
+    })
+  );
+
+  pr.done("PDFs ready");
+
+  /* ------------------------------------------------------------------
+   E. Build XML with server-side streaming progress
+   ------------------------------------------------------------------ */
+  const pid = uuidv4();
+  pr.start(fileNames.length, "Building XML on server");
+
+  /* open WebSocket *before* triggering build */
+  const ws = new WebSocket(
+    `${location.protocol === "https:" ? "wss" : "ws"}://${
+      location.host
+    }/api/stream/${pid}`
+  );
+
+  let prev = 0; // <- remembers last reported “done”
+  ws.onmessage = (ev) => {
+    const { done, total } = JSON.parse(ev.data);
+    pr.setTotal(total); // update max if server adapts
+    pr.step("", done - prev); // advance only by the delta
+    prev = done;
+  };
+
+  ws.onerror = () => console.warn("progress WS error – continuing silently");
+  ws.onclose = () => pr.done(); // guarantee bar reaches 100 %
+
+  /* kick off the build */
+  const buildBody: Record<string, unknown> = {
+    fileNames,
+    overrides: cache,
+    browserMapped,
+    package: packageOn,
+    zipPair: zipPair && packageOn,
+  };
+  if (folderHandle) buildBody.inDir = destDir;
+  if (outDir) buildBody.outDir = "__client__";
+
+  /* helper – optional local XML copy */
+  const writeXmlLocally = async (fname: string, xml: string) => {
     if (!outDir) return;
-    const outName = file.replace(/\.json$/i, ".xml");
-    const h = await outDir.getFileHandle(outName, { create: true });
+    const h = await outDir.getFileHandle(fname.replace(/\.json$/i, ".xml"), {
+      create: true,
+    });
     const w = await h.createWritable();
     await w.write(xml);
     await w.close();
-    debug("batchTransform", `💾 wrote ${outName} locally`);
   };
+  const { data } = await api.post(`/batch_build?pid=${pid}`, buildBody);
 
-  /* 3 ─ FAST PATH ─ /batch_build  */
-  try {
-    pr.step("Building XML on server");
-    const buildBody: any = {
-      fileNames,
-      overrides: cache,
-      outDir: outDir ? "__client__" : undefined,
-      browserMapped,
-      package: packageOn,
-      zipPair,
-    };
-
-    // only when we DID upload PDFs (folderHandle !== null)
-    if (folderHandle) buildBody.inDir = STAGING;
-
-    const { data } = await api.post("/batch_build", buildBody);
-
-    pr.done("Finished");
-
-    debug("batchTransform", "✓ /batch_build OK");
-    for (const r of data.results as Result[]) {
-      if (r.success && r.xml) await writeXmlLocally(r.file, r.xml);
-      pr.step(`Server build (${r.file})`);
-    }
-    return data.results as Result[];
-  } catch (err) {
-    debug("batchTransform", "⚠ /batch_build failed – fallback", err);
-    pr.error(String(err));
+  /* optional local copy */
+  for (const r of data.results as Result[]) {
+    if (r.success && r.xml) await writeXmlLocally(r.file, r.xml);
   }
 
-  /* 4 ─ FALLBACK ─ build in-browser  */
-  const results: Result[] = [];
-  for (const fname of fileNames) {
-    try {
-      const { data: xml } = await api.post("/build", {
-        mapped: browserMapped[fname],
-      });
-      await writeXmlLocally(fname, xml);
-      results.push({ file: fname, success: true, xml });
-    } catch (e: any) {
-      results.push({ file: fname, success: false, error: String(e) });
-    }
-  }
-  debug("batchTransform", "⬅ fallback complete –", results.length, "files");
-  pr.done();
-  return results;
+  workerPool.forEach((w) => w.terminate());
+  ws.close(); // close the WebSocket
+  return data.results as Result[];
 }

@@ -1,6 +1,6 @@
 import { DataGrid } from "@mui/x-data-grid";
 import { Box, CircularProgress } from "@mui/material";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
 import { collectJsonKeys } from "../utils/jsonKeys";
 import { useCategoryFilter } from "../hooks/useCategoryFilter";
@@ -10,7 +10,9 @@ import { buildColumns } from "../utils/buildColumns";
 import { getRowClassName } from "../utils/rowUtils";
 
 import type { MappingRow, Override } from "../types/mapping";
+import ValueTransformDialog from "./ValueTransformDialog";
 import type { Cat } from "./CategoryFilterSelect";
+import type { TransformChain } from "../components/ValueTransformDialog";
 
 interface Props {
   rows: MappingRow[];
@@ -52,6 +54,41 @@ function MappingTableBase({
 
   const includeState = stateOf();
 
+  /* ── overlay state ───────────────────────────────────────────── */
+  const [editing, setEditing] = useState<{
+    row: MappingRow;
+    raw: unknown;
+    chain: TransformChain;
+  } | null>(null);
+
+  const handleSave = (final: string, chain: TransformChain) => {
+    const r = editing!.row;
+
+    onEdit(
+      r.tag,
+      {
+        jsonKey: r.jsonKey, // keep whatever key was mapped
+        include: true, // ✔ auto-enable
+        mode: r.mode ?? "pick", // keep prior behaviour (NOT "hard")
+        value: final, // preview value (helps diffing)
+        xform: chain, // ★ the real magic
+        // touched: true,
+      },
+      true // touchTemplate? – keep your old flag
+    );
+
+    setEditing(null);
+  };
+
+  const openEditor = useCallback(
+    (row: MappingRow) => {
+      const raw = row.jsonKey && json ? (json as any)[row.jsonKey] : row.value;
+      const chain = (row as any).xform ?? []; // ★ reuse previous edits
+      setEditing({ row, raw, chain });
+    },
+    [json]
+  );
+
   /* ─── Column definitions (pure, memoised) ───────────────────────── */
   const columns = useMemo(
     () =>
@@ -65,6 +102,7 @@ function MappingTableBase({
         suggest,
         onEdit,
         visibleRows,
+        openEditor,
       }),
     [
       selectedCats,
@@ -75,6 +113,7 @@ function MappingTableBase({
       suggest,
       onEdit,
       visibleRows,
+      openEditor,
     ]
   );
 
@@ -93,12 +132,25 @@ function MappingTableBase({
       <DataGrid
         rows={visibleRows}
         columns={columns}
-        getRowId={(r) => `${r.tag}::${r.id}`}
+        getRowId={(r: MappingRow) => `${r.tag}::${r.id}`}
         editMode="cell"
         density="compact"
         sx={{ height: "100%", width: "100%" }}
-        getRowClassName={getRowClassName}
+        getRowClassName={getRowClassName as (params: any) => string}
       />
+
+      {editing && (
+        <ValueTransformDialog
+          open
+          rawValue={editing.raw}
+          currentValue={editing.row.value}
+          json={json}
+          jsonKeys={jsonKeys}
+          initialChain={editing.chain}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+        />
+      )}
     </Box>
   );
 }

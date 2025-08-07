@@ -1,4 +1,5 @@
 // Central place for all mapping-related types
+import type { TransformChain } from "../components/ValueTransformDialog";
 
 export type RowCategory =
   | "filename"
@@ -27,6 +28,7 @@ export interface MappingRow {
   warning: boolean | undefined;
   category: RowCategory;
   mode?: "pick" | "hard" | "real";
+  xform?: TransformChain;
 }
 
 /** what we store in mappingCache[fileName] */
@@ -36,6 +38,7 @@ export interface Override {
   include: boolean;
   /** "pick" | "hard" | "real"  (how jsonKey was chosen) */
   mode: "pick" | "hard" | "real";
+  xform?: TransformChain;
 }
 
 /** mappingCache = { [fileName]: { [updataTag]: Override } } */
