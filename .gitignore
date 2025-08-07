@@ -32,8 +32,7 @@ input_*/
 input/*
 !input/.gitkeep
 input_local/
-pdf_storage/*
-!pdf_storage/.gitkeep
+pdf_storage/
 # Comparison files
 backend/compare.py
 frontend/src/components/compare.tsx
