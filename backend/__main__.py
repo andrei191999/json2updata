@@ -1,7 +1,10 @@
 import json
-import argparse, pathlib, sys
+import argparse, pathlib
 from backend.mapper import Mapper
 from backend.xml_builder import build_updata_xml, validate_xml
+from backend.settings import get_settings
+
+settings = get_settings()
 
 def _safe_print(*parts, **kwargs):
     """
@@ -20,7 +23,7 @@ def main(argv=None):
     parser.add_argument("--out", type=pathlib.Path, default=pathlib.Path.cwd())
     args = parser.parse_args(argv)
 
-    mapper = Mapper("resources/updata-2.6.14.csv", "resources/defaults.yaml")
+    mapper = Mapper(settings.SPEC_CSV, settings.DEFAULTS_YAML)
     data   = args.json.read_text(encoding="utf-8")
     mapped, *_ = mapper.map_json(json.loads(data))
     xml_bytes  = build_updata_xml(mapped)

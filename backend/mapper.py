@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging, re, yaml
+import re, yaml, time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
@@ -10,9 +10,10 @@ from rapidfuzz import fuzz, process
 from backend.smart_suggester import SmartSuggester
 from backend.spec_parser import TagSpec, load_spec
 from backend.date_utils import looks_like_date as _is_date
+from backend.settings import get_settings
+from backend.logging_config import dbg, thread_local
 
-log = logging.getLogger("mapper")
-
+settings = get_settings()
 
 # ────────────────────────────── helpers ──────────────────────────────────
 def _is_empty(v: Any) -> bool:
@@ -30,10 +31,12 @@ class Mapper:
         self,
         spec_path: str | Path,
         defaults_path: str | Path | None = None,
-        fuzzy_threshold: int = 60,
+        fuzzy_threshold: int | None = None,
         *,
         enable_semantic: bool = True,
     ) -> None:
+        if fuzzy_threshold is None:
+            fuzzy_threshold = settings.FUZZY_THRESHOLD
         (
             self._specs,
             self._required,
@@ -46,13 +49,13 @@ class Mapper:
         ) = load_spec(Path(spec_path))
 
         # DEBUG: dump what the mapper thinks are parents vs required
-        log.debug(
-            "Mapper.init → required(%d)=%s ; cond(%d)=%s ; "
-            "parents_req(%d)=%s ; parents_opt(%d)=%s",
-            len(self._required), sorted(self._required),
-            len(self._cond_required), sorted(self._cond_required),
-            len(self._parent_req), sorted(self._parent_req),
-            len(self._parent_opt), sorted(self._parent_opt),
+        dbg(
+            "mapper",
+            "Mapper.init",
+            required=len(self._required),
+            cond=len(self._cond_required),
+            parents_req=len(self._parent_req),
+            parents_opt=len(self._parent_opt),
         )
 
         self._spec_by_tag: dict[str, TagSpec] = {s.tag: s for s in self._specs}
@@ -68,7 +71,11 @@ class Mapper:
             fuzzy_threshold=fuzzy_threshold,
             enable_semantic=enable_semantic,
         )
-        log.debug("SmartSuggester initialized with semantic search %s", "ENABLED" if enable_semantic else "DISABLED")
+        dbg(
+            "mapper",
+            "SmartSuggester initialized",
+            semantic="ENABLED" if enable_semantic else "DISABLED",
+        )
 
     # ---------------------------------------------------------------- utils
     @staticmethod
@@ -125,7 +132,7 @@ class Mapper:
 
     # ─────────────────── classify
     def _classify(
-        self, mapped: Dict[str, Any]
+        self, mapped: Dict[str, Any], json_filename: str | None = None
     ) -> Tuple[Set[str], Set[str]]:
         """
         Return (errors, warnings) according to the rules:
@@ -133,58 +140,98 @@ class Mapper:
         • errors   = required leafs  (missing ∪ empty)
         • warnings = mapped-but-empty non-required leafs
         """
-        errors: Set[str] = set()
-        warnings: Set[str] = set()
+        t0 = time.perf_counter()
+        prev_filename = getattr(thread_local, "log_context_filename", None)
+        if json_filename is not None:
+            thread_local.log_context_filename = json_filename
+        try:
+            dbg("mapper", "START _classify", keys=len(mapped))
+            errors: Set[str] = set()
+            warnings: Set[str] = set()
 
-        for tag in self._required:
-            if _is_parent(tag, self._spec_by_tag):
-                continue
-            if tag not in mapped:
-                errors.add(tag)
-            elif _is_empty(mapped[tag]):
-                errors.add(tag)
+            for tag in self._required:
+                if _is_parent(tag, self._spec_by_tag):
+                    continue
+                if tag not in mapped:
+                    errors.add(tag)
+                elif _is_empty(mapped[tag]):
+                    errors.add(tag)
 
-        for tag, val in mapped.items():
-            if tag in self._required or _is_parent(tag, self._spec_by_tag):
-                continue
-            if _is_empty(val):
-                warnings.add(tag)
+            for tag, val in mapped.items():
+                if tag in self._required or _is_parent(tag, self._spec_by_tag):
+                    continue
+                if _is_empty(val):
+                    warnings.add(tag)
 
-        return errors, warnings
+            dbg(
+                "mapper",
+                "Finished _classify",
+                errors=len(errors),
+                warnings=len(warnings),
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+            )
+            return errors, warnings
+        finally:
+            if json_filename is not None:
+                thread_local.log_context_filename = prev_filename
 
     # ─────────────────── map_json
     def map_json(
-        self, data: Dict[str, Any]
+        self, data: Dict[str, Any], json_filename: str | None = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Tuple[Set[str], Set[str]]]:
-        log.debug("Starting JSON mapping for %d keys", len(data))
-        mapped: Dict[str, Any] = {}
-        leftover: Dict[str, Any] = {}
+        t0 = time.perf_counter()
+        prev_filename = getattr(thread_local, "log_context_filename", None)
+        if json_filename is not None:
+            thread_local.log_context_filename = json_filename
+        try:
+            dbg("mapper", "START map_json", keys=len(data))
+            mapped: Dict[str, Any] = {}
+            leftover: Dict[str, Any] = {}
 
-        # pass 1 – direct & alias mapping
-        for raw_key, val in data.items():
-            if _is_empty(val):
-                continue
-            tag = self._resolve_key(str(raw_key), val)
-            if tag:
-                mapped[tag] = val
-                self._suggester.register_mapping({tag: raw_key})
-            else:
-                leftover[self._sanitize(raw_key)] = val
+            # pass 1 – direct & alias mapping
+            for raw_key, val in data.items():
+                if _is_empty(val):
+                    continue
+                tag = self._resolve_key(str(raw_key), val)
+                if tag:
+                    mapped[tag] = val
+                    self._suggester.register_mapping({tag: raw_key})
+                else:
+                    leftover[self._sanitize(raw_key)] = val
 
-        log.debug("Pass 1 (direct match) complete. Mapped: %d, Leftover: %d", len(mapped), len(leftover))
+            dbg(
+                "mapper",
+                "Pass 1 complete",
+                mapped=len(mapped),
+                leftover=len(leftover),
+            )
 
-        # pass 2 — REQUIRED tags only: fall-back to alias list
-        # ... (no changes needed inside this loop)
+            # pass 2 — REQUIRED tags only: fall-back to alias list
+            # inject YAML defaults
+            missing_before_defaults = self._required - mapped.keys()
+            if missing_before_defaults:
+                dbg(
+                    "mapper",
+                    "Applying defaults",
+                    count=len(missing_before_defaults),
+                )
+                self._apply_defaults(mapped, missing_before_defaults)
 
-        # inject YAML defaults
-        missing_before_defaults = self._required - mapped.keys()
-        if missing_before_defaults:
-            log.debug("Attempting to apply defaults for %d missing required tags", len(missing_before_defaults))
-            self._apply_defaults(mapped, missing_before_defaults)
+            errors, warnings = self._classify(mapped)
+            dbg(
+                "mapper",
+                "Finished map_json",
+                mapped=len(mapped),
+                leftover=len(leftover),
+                errors=len(errors),
+                warnings=len(warnings),
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+            )
+            return mapped, leftover, (errors, warnings)
 
-        errors, warnings = self._classify(mapped)
-        log.debug("Classification complete. Errors: %d, Warnings: %d", len(errors), len(warnings))
-        return mapped, leftover, (errors, warnings)
+        finally:
+            if json_filename is not None:
+                thread_local.log_context_filename = prev_filename
 
     def _apply_defaults(self, mapped: Dict[str, Any], missing: Set[str]) -> None:
         def walk(pref: str, node: Any):
@@ -199,7 +246,34 @@ class Mapper:
         walk("", self._defaults)
 
     # -------------------- suggestion list  (for dropdown)
-    def suggest(self, json_data: Dict[str, Any], *, level: str = "normal", top_n: int = 5) -> Dict[str, List[Tuple[str, int]]]:
-        # delegate to SmartSuggester – now does alias, sane fuzzy,
-        # type hints, frequency & MiniLM similarity
-        return self._suggester.suggest(json_data, level=level, top_n=top_n)
+    def suggest(
+        self,
+        json_data: Dict[str, Any],
+        *,
+        level: str = "normal",
+        top_n: int = 5,
+        json_filename: str | None = None,
+    ) -> Dict[str, List[Tuple[str, int]]]:
+        t0 = time.perf_counter()
+        prev_filename = getattr(thread_local, "log_context_filename", None)
+        if json_filename is not None:
+            thread_local.log_context_filename = json_filename
+        try:
+            dbg(
+                "mapper",
+                "START suggest",
+                keys=len(json_data),
+                level=level,
+                top_n=top_n,
+            )
+            result = self._suggester.suggest(json_data, level=level, top_n=top_n)
+            dbg(
+                "mapper",
+                "Finished suggest",
+                suggestions=sum(len(v) for v in result.values()),
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+            )
+            return result
+        finally:
+            if json_filename is not None:
+                thread_local.log_context_filename = prev_filename

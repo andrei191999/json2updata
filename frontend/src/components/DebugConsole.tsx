@@ -1,4 +1,10 @@
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+} from "react";
 import {
   Box,
   Paper,
@@ -72,76 +78,132 @@ const colors = {
 const LogRow = React.memo(
   ({
     log,
+    isExpanded,
+    onToggle,
     onTagClick,
   }: {
     log: LogEntry;
+    isExpanded: boolean;
+    onToggle: () => void;
     onTagClick: (tag: string) => void;
-  }) => (
-    <Box
-      sx={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 1.5,
-        py: 0.5,
-        px: 1,
-        borderBottom: `1px solid ${colors.bgLight}`,
-      }}
-    >
-      <Typography
-        component="span"
+  }) => {
+    const header = (
+      <Box
+        onClick={onToggle}
         sx={{
-          color: getLevelColor(log.level, colors),
-          fontWeight: "bold",
-          minWidth: "65px",
-          fontFamily: "monospace",
-          fontSize: "0.8rem",
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          py: 0.5,
+          px: 1,
+          cursor: "pointer",
+          "&:hover": { bgcolor: colors.bgLight },
         }}
       >
-        {log.level}
-      </Typography>
-      <Typography
-        component="span"
-        sx={{
-          color: colors.comment,
-          minWidth: "80px",
-          fontFamily: "monospace",
-          fontSize: "0.8rem",
-        }}
-      >
-        {formatTime(log.timestamp)}
-      </Typography>
-      <Tooltip title="Click to filter by this tag">
-        <Chip
-          label={log.tag}
-          size="small"
+        <Typography
+          component="span"
           sx={{
-            height: "20px",
-            fontSize: "0.75rem",
-            mr: 1,
-            cursor: "pointer",
-            bgcolor: colors.bgLight,
-            color: colors.purple,
-            "&:hover": { bgcolor: colors.comment },
+            color: getLevelColor(log.level, colors),
+            fontWeight: "bold",
+            minWidth: "65px",
+            fontFamily: "monospace",
+            fontSize: "0.8rem",
           }}
-          onClick={() => onTagClick(log.tag)}
-        />
-      </Tooltip>
-      <Typography
-        component="pre"
+        >
+          {log.level}
+        </Typography>
+        <Typography
+          component="span"
+          sx={{
+            color: colors.comment,
+            minWidth: "80px",
+            fontFamily: "monospace",
+            fontSize: "0.8rem",
+          }}
+        >
+          {formatTime(log.timestamp)}
+        </Typography>
+        <Tooltip title="Click to filter by this tag">
+          <Chip
+            label={log.tag}
+            size="small"
+            onClick={(e) => {
+              e.stopPropagation();
+              onTagClick(log.tag);
+            }}
+            sx={{
+              height: "20px",
+              fontSize: "0.75rem",
+              mr: 1,
+              cursor: "pointer",
+              bgcolor: colors.bgLight,
+              color: colors.purple,
+              "&:hover": { bgcolor: colors.comment },
+            }}
+          />
+        </Tooltip>
+        {/* Compact preview of the message */}
+        <Typography
+          component="span"
+          sx={{
+            flex: 1,
+            color: colors.fg,
+            fontFamily: "monospace",
+            fontSize: "0.85rem",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+          title={log.message}
+        >
+          {log.message}
+        </Typography>
+        <Typography
+          component="span"
+          sx={{ color: colors.comment, fontFamily: "monospace", ml: 1 }}
+        >
+          {isExpanded ? "▲" : "▼"}
+        </Typography>
+      </Box>
+    );
+
+    return (
+      <Box
         sx={{
-          flex: 1,
-          wordBreak: "break-word",
-          whiteSpace: "pre-wrap",
-          fontFamily: "monospace",
-          fontSize: "0.85rem",
-          m: 0,
-          color: colors.fg,
+          borderBottom: `1px solid ${colors.bgLight}`,
+          px: 0,
         }}
       >
-        {log.message}
-      </Typography>
-    </Box>
-  )
+        {header}
+        {isExpanded && (
+          <Box sx={{ px: 2, pb: 1 }}>
+            {/* Full message + optional extras if present */}
+            <Typography
+              component="pre"
+              sx={{
+                m: 0,
+                color: colors.fg,
+                fontFamily: "monospace",
+                fontSize: "0.85rem",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {log.message}
+            </Typography>
+            {/* If your backend sends extra fields (e.g., fileName), show them */}
+            {log.fileName && (
+              <Typography
+                sx={{ mt: 0.5, color: colors.comment, fontSize: "0.75rem" }}
+              >
+                file: {log.fileName}
+              </Typography>
+            )}
+          </Box>
+        )}
+      </Box>
+    );
+  }
 );
 
 // --- Main Console Component ---
@@ -183,6 +245,7 @@ export default function DebugConsole({
   // --- Non-persistent state ---
   const [isMaximized, setIsMaximized] = useState(false);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
   // --- Derived Data and Refs ---
   const counts = useLogCounts(logs);
@@ -209,6 +272,21 @@ export default function DebugConsole({
       next.has(fileName) ? next.delete(fileName) : next.add(fileName);
       return next;
     });
+  }, []);
+  const toggleRowExpanded = useCallback((rowKey: string, rowIndex?: number) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      next.has(rowKey) ? next.delete(rowKey) : next.add(rowKey);
+      return next;
+    });
+    // Bust the measurement cache for this row so it can grow/shrink
+    if (typeof rowIndex === "number") {
+      cache.current.clear(rowIndex, 0);
+      listRef.current?.recomputeRowHeights(rowIndex);
+    } else {
+      cache.current.clearAll();
+      listRef.current?.recomputeRowHeights(0);
+    }
   }, []);
 
   const handleLevelChange = (_event: React.MouseEvent, newLevels: LogLevel[]) =>
@@ -267,19 +345,34 @@ export default function DebugConsole({
     listRef.current?.recomputeRowHeights(0);
   }, [filteredLogs, activeTab, size]);
 
-  const rowRenderer = ({ index, key, style, parent }: any) => (
-    <CellMeasurer
-      cache={cache.current}
-      columnIndex={0}
-      key={key}
-      parent={parent}
-      rowIndex={index}
-    >
-      <div style={style}>
-        <LogRow log={filteredLogs[index]} onTagClick={handleTagClick} />
-      </div>
-    </CellMeasurer>
+  const reversedLogs = React.useMemo(
+    () => [...filteredLogs].reverse(),
+    [filteredLogs]
   );
+
+  const rowRenderer = ({ index, key, style, parent }: any) => {
+    const log = reversedLogs[index];
+    const rowKey = `${log.timestamp}-${log.tag}-${index}`; // stable enough
+    const isExpanded = expandedRows.has(rowKey);
+    return (
+      <CellMeasurer
+        cache={cache.current}
+        columnIndex={0}
+        key={key}
+        parent={parent}
+        rowIndex={index}
+      >
+        <div style={style}>
+          <LogRow
+            log={log}
+            isExpanded={isExpanded}
+            onToggle={() => toggleRowExpanded(rowKey, index)}
+            onTagClick={handleTagClick}
+          />
+        </div>
+      </CellMeasurer>
+    );
+  };
 
   if (!open) return null;
 
@@ -490,13 +583,23 @@ export default function DebugConsole({
                       bgcolor: colors.bg,
                     }}
                   >
-                    {fileLogs.map((log, index) => (
-                      <LogRow
-                        key={index}
-                        log={log}
-                        onTagClick={handleTagClick}
-                      />
-                    ))}
+                    {fileLogs
+                      .slice()
+                      .reverse()
+                      .map((log, index) => (
+                        <LogRow
+                          log={log}
+                          isExpanded={expandedRows.has(
+                            `${log.timestamp}-${log.tag}-${index}`
+                          )}
+                          onToggle={() =>
+                            toggleRowExpanded(
+                              `${log.timestamp}-${log.tag}-${index}`
+                            )
+                          }
+                          onTagClick={handleTagClick}
+                        />
+                      ))}
                   </AccordionDetails>
                 </Accordion>
               ))}
@@ -508,7 +611,7 @@ export default function DebugConsole({
                   ref={listRef}
                   height={height}
                   width={width}
-                  rowCount={filteredLogs.length}
+                  rowCount={reversedLogs.length}
                   rowHeight={cache.current.rowHeight}
                   rowRenderer={rowRenderer}
                   deferredMeasurementCache={cache.current}

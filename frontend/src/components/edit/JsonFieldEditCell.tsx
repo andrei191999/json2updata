@@ -1,113 +1,65 @@
 import React from "react";
 import { Select, MenuItem, ListSubheader } from "@mui/material";
 import type { GridRenderCellParams } from "@mui/x-data-grid";
-import type { Override } from "../../types/mapping";
+import type { MappingRow, Override } from "../../types/mapping";
 
-interface Props extends GridRenderCellParams {
+// This component is now an EDITOR, used only when a cell is in edit mode.
+interface Props extends GridRenderCellParams<any, MappingRow> {
   suggest: Record<string, [string, number][]>;
-  jsonKeys: string[];
-  json: Record<string, unknown>;
-  onEdit: (tag: string, patch: Override) => void;
+  onEdit: (
+    tag: string,
+    patch: Partial<Override>,
+    touchTemplate?: boolean
+  ) => void;
 }
 
-function JsonFieldEditCell({ row, value, suggest, json, onEdit }: Props) {
-  const tag = row.tag as string;
-  const top3 = (suggest[tag] || []).slice(0, 3);
-  const currentKey = row.jsonKey as string;
-  const menuItems: React.ReactNode[] = [];
+function JsonFieldEditCell({ row, onEdit, suggest, api }: Props) {
+  const handleChange = (event: any) => {
+    const selected = event.target.value as string;
 
-  if (
-    row.category === "parent-required" ||
-    row.category === "parent-optional"
-  ) {
-    return null; // render empty cell
-  }
+    if (selected === "__alias_mode__") {
+      // Set mode to "alias" and clear specific keys.
+      // The ValueCell will now show the alias Autocomplete.
+      onEdit(row.tag, { mode: "alias", jsonKey: "", aliasFor: "" }, true);
+    } else if (selected === "__hard__") {
+      onEdit(row.tag, { mode: "hard", jsonKey: "" }, true);
+    } else if (selected === "__pick__") {
+      onEdit(row.tag, { mode: "pick", jsonKey: "" }, true);
+    } else {
+      // A real JSON key was selected from suggestions
+      onEdit(row.tag, { mode: "real", jsonKey: selected }, true);
+      // We're done, so stop editing this cell.
+      api.stopCellEditMode({ id: row.id, field: "jsonKey" });
+    }
+  };
 
-  if (
-    currentKey &&
-    !["__hard__", "__pick__", ""].includes(currentKey) &&
-    !top3.some(([k]) => k === currentKey)
-  ) {
-    menuItems.push(
-      <ListSubheader key="hdr-current">Current</ListSubheader>,
-      <MenuItem key={currentKey} value={currentKey}>
-        {currentKey}
-      </MenuItem>
-    );
-  }
-
-  menuItems.push(<ListSubheader key="hdr-suggest">Suggestions</ListSubheader>);
-  top3.forEach(([k, score]) =>
-    menuItems.push(
-      <MenuItem key={k} value={k}>
-        {k} ({score}%)
-      </MenuItem>
-    )
-  );
-
-  menuItems.push(
-    <ListSubheader key="hdr-override">Overrides</ListSubheader>,
-    <MenuItem key="__hard__" value="__hard__">
-      Hard-code…
-    </MenuItem>,
-    <MenuItem key="__pick__" value="__pick__">
-      Pick from input…
-    </MenuItem>
-  );
+  const top3 = suggest[row.tag]?.slice(0, 3) || [];
 
   return (
     <Select
-      value={row.jsonKey || ""}
+      value={row.jsonKey || "__pick__"} // Default to "pick" to show the picker
+      onChange={handleChange}
       size="small"
-      sx={{ minWidth: 200 }}
-      onChange={(e) => {
-        const sel = e.target.value as string;
-        const mode =
-          sel === "__hard__" ? "hard" : sel === "__pick__" ? "pick" : "real";
-
-        if ((window as any).APP_DEBUG) {
-          console.debug(
-            `[JsonFieldEditCell] tag=${tag} selecting jsonKey=${sel}, mode=${mode}`
-          );
-        }
-
-        if (sel === "__hard__") {
-          onEdit(tag, {
-            jsonKey: "__hard__",
-            mode: "hard",
-            include: true,
-            value: "",
-          });
-        } else if (sel === "__pick__") {
-          onEdit(tag, {
-            jsonKey: "__pick__",
-            mode: "pick",
-            include: true,
-            value: "",
-          });
-        } else {
-          // a real suggestion
-          onEdit(tag, {
-            jsonKey: sel,
-            mode: "real",
-            include: true,
-            value: String((json as any)[sel] ?? ""),
-          });
-        }
-      }}
+      fullWidth
+      autoFocus
+      open
     >
-      {menuItems}
+      <ListSubheader>Actions</ListSubheader>
+      <MenuItem value="__hard__">Hard-code value...</MenuItem>
+      <MenuItem value="__pick__">Pick from JSON input...</MenuItem>
+      {/* Only show alias option for the special filename row */}
+      {row.tag === "_pdf_name" && (
+        <MenuItem value="__alias_mode__">Alias from another field...</MenuItem>
+      )}
+
+      {top3.length > 0 && <ListSubheader>Suggestions</ListSubheader>}
+      {top3.map(([key]) => (
+        <MenuItem key={key} value={key}>
+          {key}
+        </MenuItem>
+      ))}
     </Select>
   );
 }
 
-/* ----  Memoise so unchanged rows don’t re-render -------------------- */
-function areEqual(prev: Props, next: Props) {
-  return (
-    prev.row.jsonKey === next.row.jsonKey &&
-    prev.row.mode === next.row.mode &&
-    prev.row.value === next.row.value
-  );
-}
-
-export default React.memo(JsonFieldEditCell, areEqual);
+export default JsonFieldEditCell; // No need for memo on an edit component

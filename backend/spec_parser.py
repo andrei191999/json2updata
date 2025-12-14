@@ -23,17 +23,15 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple, Set, Iterable, Any
+from typing import List, Dict, Tuple, Set
+from backend.settings import get_settings
+from backend.logging_config import dbg
 
-_THIS_FILE = Path(__file__).resolve()
-DEFAULT_CSV = _THIS_FILE.parent.parent / 'resources' / "updata-2.6.14.csv"
-
+settings = get_settings()
 
 # ───────────────────────────────────────────────────────── helpers ──
 def _norm(s: str | None) -> str:
     return (s or "").strip().upper()
-
-
 # ────────────────────────────────────────────────────────────────────────────
 # Data structure
 # ────────────────────────────────────────────────────────────────────────────
@@ -47,7 +45,7 @@ class TagSpec:
 
 
 # ────────────────────────────────────────────────────────── loader ──
-def load_spec(csv_path: str | Path = DEFAULT_CSV) -> Tuple[
+def load_spec(csv_path: str | Path = settings.SPEC_CSV) -> Tuple[
         List[TagSpec],
         Set[str],                    # required leaves  (M)
         Set[str],                    # conditional leaves (C)
@@ -95,10 +93,8 @@ def load_spec(csv_path: str | Path = DEFAULT_CSV) -> Tuple[
                 elif mand == "C":
                     conditional.add(tag)
 
-    import logging
-    _log = logging.getLogger(__name__)
-    _log.debug(
-        "spec_parser.load_spec → required(%d)=%s ; conditional(%d)=%s ; "
+    dbg(
+        "spec_parser", "load_spec → required(%d)=%s ; conditional(%d)=%s ; "
         "parent_req(%d)=%s ; parent_opt(%d)=%s",
         len(required), sorted(required),
         len(conditional), sorted(conditional),

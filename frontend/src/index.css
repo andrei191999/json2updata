@@ -1,12 +1,11 @@
+/* Keep existing root and light theme styles */
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-
   color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
   background-color: #242424;
-
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -61,49 +60,109 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+/* --- NEW: High-contrast dark theme styles for DataGrid rows --- */
+@media (prefers-color-scheme: dark) {
+  .row-required .MuiDataGrid-cell {
+    background-color: rgba(255, 209, 67, 0.2) !important; /* Deeper Yellow */
+  }
+  .row-conditional .MuiDataGrid-cell {
+    background-color: rgba(67, 160, 255, 0.15) !important; /* Deeper Blue */
+  }
+  .row-guessed .MuiDataGrid-cell {
+    background-color: rgba(102, 187, 106, 0.2) !important; /* Deeper Green */
+  }
+  .row-parent-required .MuiDataGrid-cell {
+    background-color: rgba(186, 104, 200, 0.2) !important; /* Deeper Purple */
+  }
+  .row-parent-optional .MuiDataGrid-cell {
+    background-color: rgba(255, 183, 77, 0.2) !important; /* Deeper Orange */
+  }
+}
+
+/* Fallback/Light theme styles */
 @media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
+  .row-required .MuiDataGrid-cell {
+    background-color: #fff7d6 !important;
   }
-  a:hover {
-    color: #747bff;
+  .row-conditional .MuiDataGrid-cell {
+    background-color: #e7f5ff !important;
   }
-  button {
-    background-color: #f9f9f9;
+  .row-guessed .MuiDataGrid-cell {
+    background-color: #e8fbe8 !important;
+  }
+  .row-parent-required .MuiDataGrid-cell {
+    background: #ede0ff !important;
+  }
+  .row-parent-optional .MuiDataGrid-cell {
+    background: #fff3e0 !important;
   }
 }
 
-.row-required .MuiDataGrid-cell {
-  background-color: #fff7d6 !important;
-}
-.row-conditional .MuiDataGrid-cell {
-  background-color: #e7f5ff !important;
-}
-.row-guessed .MuiDataGrid-cell {
-  background-color: #e8fbe8 !important;
-}
-.row-parent-required .MuiDataGrid-cell {
-  background: #ede0ff !important;
-} /* lavender */
-.row-parent-optional .MuiDataGrid-cell {
-  background: #fff3e0 !important;
-} /* light orange */
-
+/* Other existing styles remain unchanged */
 .row-hard .MuiDataGrid-cell:first-of-type::before {
   content: "🛠";
   margin-right: 4px;
 }
-
-.debug-drag-handle {
-  cursor: move;
-}
-
 .split {
-  touch-action: none; /* disable touch panning on the gutters */
+  touch-action: none;
+}
+.row-filename .MuiDataGrid-cell {
+  border-bottom: 2px solid #8884;
+  font-weight: 600;
 }
 
-.row-filename .MuiDataGrid-cell {
-  border-bottom: 2px solid #8884; /* subtle separator */
-  font-weight: 600; /* make it stand out */
+/*
+ * ===============================================
+ * DataGrid Custom Styling
+ * ===============================================
+ */
+
+/* -- Row Color-Coding by Category -- */
+/* We use rgba for semi-transparent "diffused" colors */
+.row-required,
+.row-parent-required {
+  background-color: rgba(45, 156, 219, 0.1); /* Soft Blue */
+}
+
+.row-conditional {
+  background-color: rgba(242, 153, 74, 0.1); /* Soft Orange */
+}
+
+.row-parent-optional,
+.row-filename {
+  background-color: rgba(111, 66, 193, 0.07); /* Soft Purple */
+}
+
+/* -- Row Spacing & Hover Effect -- */
+.MuiDataGrid-row {
+  min-height: 48px !important; /* Increases row height for more padding */
+  transition: background-color 0.2s ease-in-out;
+}
+
+.MuiDataGrid-row:hover {
+  background-color: rgba(128, 128, 128, 0.15) !important;
+}
+
+.MuiDataGrid-cell {
+  /* ✅ Add display:flex to enable vertical alignment */
+  display: flex;
+  align-items: center;
+
+  /* ✅ Increase font size */
+  font-size: 14px;
+
+  line-height: 1.5 !important;
+  white-space: normal !important; /* Keep word wrapping */
+  word-break: break-word !important;
+}
+
+/* -- Special Row States -- */
+.row-touched {
+  /* Adds a subtle left border to indicate user edits */
+  border-left: 3px solid #f2c94c; /* Amber */
+}
+
+.row-warning {
+  /* Adds a subtle right border for rows with warnings */
+  border-right: 3px solid #eb5757; /* Red */
 }

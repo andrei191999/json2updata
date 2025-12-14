@@ -31,16 +31,26 @@ export function applyMapping(rows: MappingRow[]) {
   const mapped: Record<string, unknown> = {};
   const warnings: string[] = [];
 
-  for (const r of rows) {
+  for (const row of rows) {
     /* skip meta / parent rows */
-    if (r.tag.startsWith("+") || r.category.startsWith("parent-")) continue;
-    if (!r.include) continue;
+    if (row.tag.startsWith("+") || row.category.startsWith("parent-")) continue;
+    if (!row.include) continue;
 
-    const val = pickValue(r.value);
+    if (row.tag === "_pdf_name") {
+      let v = String(row.value ?? "").trim();
+      if (v) {
+        // normalize: keep stem or allow .pdf, both OK in backend
+        v = v.replace(/[\\/:*?"<>|]+/g, "_").trim();
+        mapped["_pdf_name"] = v; // backend will add .pdf if missing
+      }
+      continue; // don't write into DocumentReference
+    }
+
+    const val = pickValue(row.value);
     if (val === null || val === "") continue; // nothing to emit
 
-    if (r.warning) warnings.push(r.tag);
-    mapped[r.tag] = val;
+    if (row.warning) warnings.push(row.tag);
+    mapped[row.tag] = val;
   }
 
   debug("applyMapping", "done →", mapped, warnings.length && "⚠", warnings);

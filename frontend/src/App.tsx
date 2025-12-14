@@ -2,7 +2,16 @@ import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { useProgress } from "./components/ProgressContext";
 import DebugConsole from "./components/DebugConsole";
 import Split from "react-split";
-import { Box } from "@mui/material";
+import {
+  Box,
+  LinearProgress,
+  Button,
+  Tooltip,
+  IconButton,
+  Typography,
+  Switch, // ✅ Add Switch
+  FormControlLabel,
+} from "@mui/material";
 import { api } from "./api";
 
 import FilePane from "./components/FilePane";
@@ -20,15 +29,17 @@ import { batchTransform } from "./utils/batchTransform";
 import { debug } from "./utils/debug";
 import Snackbar from "@mui/material/Snackbar";
 import MuiAlert from "@mui/material/Alert";
+
 import BugReportIcon from "@mui/icons-material/BugReport";
-import Tooltip from "@mui/material/Tooltip";
-import IconButton from "@mui/material/IconButton";
+import TocIcon from "@mui/icons-material/Toc";
+import AssessmentIcon from "@mui/icons-material/Assessment";
 
 export default function App() {
-  /* ── 1) File list + current file ─────────────────────────────────────── */
-  const { files, read: readJson, pick, folderHandle } = useFolder();
+  // --- State and Hooks ---
+  const { files, read: readJson, pick, folderHandle } = useFolder(); // Get folderHandle here
   const [selectedSel, setSelectedSel] = useState<Set<string>>(new Set());
   const [level, setLevel] = useState<"fast" | "normal" | "deep">("normal");
+  const [verboseLogging, setVerboseLogging] = useState(true);
   const [snack, setSnack] = useState<string | null>(null);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
   const [json, setJson] = useState<Record<string, unknown> | null>(null);
@@ -55,25 +66,44 @@ export default function App() {
   /* ── 4) User overrides (all files)  ──────────────────────────────────── */
   const { cache, edit, clearFile, hydrateFile, resetTemplate, clearOvs } =
     useMappingCache();
-
-  const handleKeepMappings = (checked: boolean) => {
-    setKeep(checked);
-    if (!checked) resetTemplate(); // ← clear the global template
-  };
-
-  useEffect(() => {
-    clearOvs(); // every time the user picks a brand-new folder
-  }, [folderHandle]); // dir === null initially, changes on every pick
-
-  /* ── 5) UI toggles ───────────────────────────────────────────────────── */
   const [keep, setKeep] = useState(false);
   const [loading] = useState(false);
   const [debugConsoleOpen, setDebugConsoleOpen] = useState(false);
   const [outDir, setOutDir] = useState<FileSystemDirectoryHandle | null>(null);
-  const toggle = useCallback((fname: string, on: boolean) => {
+  const [packageOn, setPackageOn] = useState(true);
+  const [zipPair, setZipPair] = useState(false);
+  const [batchResults, setBatchResults] = useState<any[]>([]);
+  const [tab, setTab] = useState<"map" | "summary">("map");
+
+  // --- Callbacks and Handlers ---
+  window.addEventListener("error", (e) => {
+    console.debug("[bt] window:error", {
+      msg: e.message,
+      src: e.filename,
+      line: e.lineno,
+      col: e.colno,
+    });
+  });
+  window.addEventListener("unhandledrejection", (e: PromiseRejectionEvent) => {
+    console.debug("[bt] window:unhandledrejection", {
+      reason: String(e.reason),
+    });
+  });
+
+  const handleKeepMappings = (checked: boolean) => {
+    setKeep(checked);
+    if (!checked) resetTemplate();
+  };
+
+  useEffect(() => {
+    clearOvs();
+  }, [folderHandle]);
+
+  const toggleFileSelection = useCallback((fname: string) => {
     setSelectedSel((prev) => {
       const next = new Set(prev);
-      on ? next.add(fname) : next.delete(fname);
+      if (next.has(fname)) next.delete(fname);
+      else next.add(fname);
       return next;
     });
   }, []);
@@ -84,15 +114,8 @@ export default function App() {
 
   const clearAll = useCallback(() => setSelectedSel(new Set()), []);
 
-  /* 🚚 PDF / ZIP toggles ------------------------------------------ */
-  const [packageOn, setPackageOn] = useState(true); // copy PDF next to XML
-  const [zipPair, setZipPair] = useState(false); // don’t ZIP by default
-
-  /* ────────────────────────────────────────────────────────────────────── */
-  /* #region  Call /map once we have JSON + toggles + spec                 */
   useEffect(() => {
     if (!json || tagList.length === 0) return;
-
     api.post(`/map?level=${level}`, json).then((res) => {
       setMapped(res.data.mapped);
       setSuggest(res.data.suggest);
@@ -107,12 +130,15 @@ export default function App() {
     const templateOverrides = cache.__template ?? {};
     return { ...templateOverrides, ...fileOverrides };
   }, [currentFile, cache]);
-  ``;
 
   const rows = useMemo(() => {
     if (
       !json ||
       tagList.length === 0 ||
+      // ✅ FIX: Add a guard to ensure orderMap is populated.
+      // This prevents buildRows from running with data that would break sorting.
+      !orderMap ||
+      Object.keys(orderMap).length === 0 ||
       (required.size === 0 && conditional.size === 0)
     ) {
       return [];
@@ -153,12 +179,10 @@ export default function App() {
   );
 
   const handlePreview = async (fname: string) => {
+    setCurrentFile(fname); // Set as current file for preview
     if (keep) hydrateFile(fname);
     else clearFile(fname);
-    setCurrentFile(fname);
-    setXml("");
-    setJson(await readJson(fname)); // ← use local reader
-
+    setJson(await readJson(fname));
     debug("preview", `[${fname}] overrides in play →`, {
       template: cache.__template__,
       file: cache[fname],
@@ -173,9 +197,6 @@ export default function App() {
     }
     setOutDir(await window.showDirectoryPicker());
   }, []);
-
-  const [batchResults, setBatchResults] = useState<any[]>([]);
-  const [tab, setTab] = useState<"map" | "summary">("map");
 
   const handleBatch = () =>
     batchTransform(
@@ -198,7 +219,6 @@ export default function App() {
         );
       })
       .catch((err) => {
-        console.error("[batchTransform] failed →", err);
         setSnack("Batch failed – see console");
       });
 
@@ -207,11 +227,27 @@ export default function App() {
     setTab("map");
   };
 
+  const handleLogToggle = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const isVerbose = event.target.checked;
+      setVerboseLogging(isVerbose);
+      try {
+        await api.post("/log-level", { level: isVerbose ? "DEBUG" : "INFO" });
+      } catch (error) {
+        console.error("Failed to set log level", error);
+      }
+    },
+    []
+  );
+
   /* 10 ───────────────────────────── XML preview once mapping ready  */
   const mappedObj = useMemo(() => toMappedObj(rows), [rows]);
 
   useEffect(() => {
-    if (Object.keys(mappedObj).length === 0) return;
+    if (Object.keys(mappedObj).length === 0) {
+      setXml("");
+      return;
+    }
     api.post("/build", { mapped: mappedObj }).then((r) => setXml(r.data));
   }, [mappedObj]);
   /* #endregion */
@@ -223,103 +259,179 @@ export default function App() {
   /* ────────────────────────────────────────────────────────────────────── */
   /* #region  Render                                                       */
   return (
-    <>
-      <Box sx={{ display: "flex", gap: 2, p: 1 }}>
-        <button onClick={() => setTab("map")}>Mapping</button>
-        <button onClick={() => setTab("summary")}>Summary</button>
+    // CHANGE: Added a flex container to ensure the layout fills the viewport height
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        width: "100vw",
+        overflow: "hidden",
+      }}
+    >
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 1, // smaller gap
+          p: 1,
+          flexWrap: "wrap",
+          flexShrink: 0, // Prevent this header from shrinking
+          borderBottom: 1,
+          borderColor: "divider",
+        }}
+      >
+        {/* --- NEW: Buttons with icons --- */}
+        <Button
+          variant={tab === "map" ? "contained" : "outlined"}
+          onClick={() => setTab("map")}
+          startIcon={<TocIcon />}
+        >
+          Mapping
+        </Button>
+        <Button
+          variant={tab === "summary" ? "contained" : "outlined"}
+          onClick={() => setTab("summary")}
+          startIcon={<AssessmentIcon />}
+        >
+          Summary
+        </Button>
+        <Box sx={{ flex: 1 }} /> {/* Spacer */}
+        {progress.active && (
+          <>
+            <Button
+              size="small"
+              variant="outlined"
+              color="error"
+              onClick={progress.cancel}
+            >
+              Cancel
+            </Button>
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 2, // Increased gap
+                minWidth: 300, // Increased minWidth
+                flex: 1, // Allow it to take more space
+                maxWidth: 400,
+              }}
+            >
+              <LinearProgress
+                variant={progress.max ? "determinate" : "indeterminate"}
+                value={progress.max ? (progress.cur / progress.max) * 100 : 0}
+                sx={{ flex: 1, height: 10, borderRadius: 5 }}
+              />
+              <Typography variant="body2" sx={{ whiteSpace: "nowrap" }}>
+                {progress.label}{" "}
+                {progress.max ? `(${progress.cur}/${progress.max})` : ""}
+              </Typography>
+            </Box>
+          </>
+        )}
+        <Box sx={{ flex: 1 }} /> {/* Spacer */}
+        <Tooltip
+          title={
+            verboseLogging
+              ? "Show all debug messages"
+              : "Show only info and errors"
+          }
+        >
+          <FormControlLabel
+            sx={{ color: "text.secondary" }}
+            control={
+              <Switch
+                checked={verboseLogging}
+                onChange={handleLogToggle}
+                size="small"
+              />
+            }
+            label={<Typography variant="caption">Verbose Logs</Typography>}
+          />
+        </Tooltip>
         <Tooltip title="Debug console">
-          <IconButton onClick={() => setDebugConsoleOpen(true)}>
+          <IconButton
+            onClick={() => setDebugConsoleOpen(true)}
+            sx={{ color: "success.main" }}
+          >
             <BugReportIcon />
           </IconButton>
         </Tooltip>
-        {/* NEW — simple toggles, move elsewhere later if you like */}
-        <label style={{ marginLeft: 12 }}>
-          <input
-            type="checkbox"
-            checked={packageOn}
-            onChange={(e) => setPackageOn(e.target.checked)}
-          />
-          &nbsp;copy&nbsp;PDF
-        </label>
-
-        <label style={{ marginLeft: 8 }}>
-          <input
-            type="checkbox"
-            checked={zipPair}
-            onChange={(e) => setZipPair(e.target.checked)}
-            disabled={!packageOn}
-          />
-          &nbsp;zip&nbsp;PDF&nbsp;+&nbsp;XML
-        </label>
       </Box>
-      {tab === "summary" ? (
-        <SummaryTab
-          results={batchResults}
-          onPreview={handlePreviewFromSummary}
-          onBackToMap={() => setTab("map")}
-        />
-      ) : (
-        <Split
-          sizes={[20, 80]} // initial percentage sizes
-          minSize={280} // minimum pixel size per pane
-          gutterSize={8} // width of the drag handle
-          direction="horizontal" // “horizontal” means a vertical split
-          cursor="col-resize"
-          style={{ display: "flex", width: "100%", height: "100%" }}
-        >
-          {/* LEFT  – file list + toggles */}
-          <FilePane
-            files={files}
-            currentPreviewFile={currentFile}
-            onPreviewFile={handlePreview}
-            keep={keep}
-            onToggleKeep={handleKeepMappings}
-            level={level}
-            onLevel={setLevel}
-            onPickDir={pick}
-            onPickOutFolder={pickOutputDir}
-            selectedSet={selectedSel}
-            onToggleFile={toggle}
-            selectAll={() => selectAll(files)}
-            clearAll={clearAll}
-            onBatch={handleBatch}
-            batchDisabled={progress.active}
-          />
-
-          {/* RIGHT – mapping + XML preview */}
-          <Box
-            sx={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              minHeight: 0,
-              height: "100%",
+      <Box sx={{ flex: 1, minHeight: 0 }}>
+        {" "}
+        {/* CHANGE: This box will contain the main content and allow it to grow */}
+        {tab === "summary" ? (
+          <SummaryTab
+            results={batchResults}
+            onPreview={handlePreviewFromSummary}
+            onBackToMap={() => {
+              setTab("map");
+              progress.dismiss();
             }}
+          />
+        ) : (
+          <Split
+            sizes={[35, 65]}
+            minSize={[400, 500]}
+            gutterSize={8}
+            direction="horizontal"
+            cursor="col-resize"
+            style={{ display: "flex", width: "100%", height: "100%" }}
           >
-            <Box sx={{ flex: 7, overflow: "auto", minHeight: 0, height: "0%" }}>
-              <MappingTable
-                currentFile={currentFile}
-                rows={rows}
-                loading={loading}
-                suggest={suggest}
-                json={json ?? {}}
-                onEdit={handleEdit}
-              />
-            </Box>
-            <Box
-              sx={{
-                flex: 3,
-                overflow: "auto",
-                borderTop: 1,
-                borderColor: "divider",
-                minHeight: 0,
-              }}
+            {/* LEFT  – file list + toggles */}
+            {/* CHANGE: Pass output toggles down to FilePane */}
+            <FilePane
+              files={files}
+              currentPreviewFile={currentFile}
+              onPreviewFile={handlePreview}
+              onToggleFileSelection={toggleFileSelection}
+              keep={keep}
+              onToggleKeep={handleKeepMappings}
+              level={level}
+              onLevel={setLevel}
+              onPickDir={pick}
+              onPickOutFolder={pickOutputDir}
+              selectedSet={selectedSel}
+              selectAll={() => selectAll(files)}
+              clearAll={clearAll}
+              onBatch={handleBatch}
+              batchDisabled={progress.active}
+              packageOn={packageOn}
+              onTogglePackage={setPackageOn}
+              zipPair={zipPair}
+              onToggleZip={setZipPair}
+              // --- NEW: Pass folder handles to FilePane ---
+              inputHandle={folderHandle}
+              outputHandle={outDir}
+            />
+
+            {/* RIGHT – mapping + XML preview */}
+            <Split
+              direction="vertical"
+              sizes={[70, 30]} // --- CHANGED: Preview pane gets 30% now
+              minSize={100}
+              gutterSize={8}
+              style={{ height: "100%", minWidth: 0 }}
             >
-              <PreviewPane xml={xml} />
-            </Box>
-          </Box>
-        </Split>
-      )}
+              <Box sx={{ overflow: "auto", height: "100%", width: "100%" }}>
+                <MappingTable
+                  currentFile={currentFile}
+                  rows={rows}
+                  loading={loading}
+                  suggest={suggest}
+                  json={json ?? {}}
+                  onEdit={handleEdit}
+                  tagList={tagList}
+                />
+              </Box>
+              <Box sx={{ overflow: "auto", height: "100%", width: "100%" }}>
+                <PreviewPane xml={xml} />
+              </Box>
+            </Split>
+          </Split>
+        )}
+      </Box>
       {/* ─── transient toaster ───────────────────────────── */}
       <Snackbar
         open={!!snack}
@@ -340,7 +452,7 @@ export default function App() {
         open={debugConsoleOpen}
         onClose={() => setDebugConsoleOpen(false)}
       />
-    </>
+    </Box>
   );
   /* #endregion */
 }

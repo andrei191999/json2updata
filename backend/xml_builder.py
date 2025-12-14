@@ -8,35 +8,23 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 from typing import Any, Dict
-from datetime import datetime, timezone, date
 
 from lxml import etree as ET
+from functools import lru_cache
 from lxml.etree import _Element
 
 from backend.spec_parser import load_spec
 from backend.date_utils import to_iso as _to_iso
+from backend.logging_config import dbg, file_log_context, thread_local
+from backend.settings       import get_settings
 
+settings = get_settings()
 # ─── Module-level logger ──────────────────────────────────────────────
-log = logging.getLogger("xml_builder")
-
-# ─── Constants & resources ────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parent.parent
-RES  = ROOT / "resources"
-
-SPEC_CSV = RES / "updata-2.6.14.csv"
-XSD_PATH = RES / "updata-2.6.14.xsd"
-
-# compile XSD once instead of per-XML
-if XSD_PATH.exists():
-    _SCHEMA = ET.XMLSchema(ET.parse(str(XSD_PATH)))
-else:
-    _SCHEMA = None
-
+_log = logging.getLogger(__name__)
 
 # CSV-derived helpers
-(_TAG_SPECS, *_REST, _ORDER_IDX) = load_spec(SPEC_CSV)
+(_TAG_SPECS, *_REST, _ORDER_IDX) = load_spec(settings.SPEC_CSV)
 
 _FIRST_LEVEL = (
     "Sender",
@@ -99,79 +87,118 @@ def build_updata_xml(
     mapped: Dict[str, Any],
     pdf_name: str | None = None,            # still supported
 ) -> bytes:
-    log.debug("Building XML from %d mapped tags", len(mapped))
-    root = ET.Element("Updata", version="2.6.14")
-    root_map: Dict[str, _Element] = {"_root": root}
+    """
+    Convert *mapped* into pretty-printed Updata XML bytes.
+    """
+    is_real_file = bool(pdf_name) and not str(pdf_name).startswith("__preview__")
+    with file_log_context(pdf_name if is_real_file else None):
+        dbg("xml_builder", f"build xml start pdf={pdf_name or '-'} mapped={len(mapped)}")
 
-    # 2) Stub out first‐level tags
-    for tag in _FIRST_LEVEL:
-        root_map[tag] = ET.SubElement(root, tag)
+        # 1) <Updata version="…">
+        root = ET.Element("Updata", version="2.6.14")
+        root_map: Dict[str, _Element] = {"_root": root}
 
-    doc_elem = root_map["Document"]   # guaranteed to exist now
+        # 2) Stub out first‐level tags
+        for tag in _FIRST_LEVEL:
+            root_map[tag] = ET.SubElement(root, tag)
 
+        doc_elem = root_map["Document"]
+        # Default / ensure a DocumentReference exists and matches the final PDF name.
+        # Mapping may have proposed a value; we override with the actual one if provided.
+        if pdf_name:
+            docrefs = _ensure_path(root_map, "DocumentReferences")
+            # Prefer the DR that matches the mapping's @ref (if any)
+            want_ref = None
+            try:
+                want_ref = (mapped.get("DocumentReferences", {}) or {}).get("DocumentReference", {})
+                if isinstance(want_ref, dict):
+                    want_ref = want_ref.get("@ref")
+            except Exception:
+                want_ref = mapped.get("DocumentReferences.DocumentReference.@ref")
+            # find existing <DocumentReference>
+            dr = None
+            for cand in docrefs.findall("DocumentReference"):
+                if want_ref is None or cand.get("ref") == want_ref:
+                    dr = cand; break
+            if dr is None:
+                dr = ET.SubElement(docrefs, "DocumentReference")
+                if want_ref:
+                    dr.set("ref", str(want_ref))
+            dr.text = pdf_name
+            dbg("xml_builder", "Set DocumentReference text to final PDF name", ref=pdf_name, keep_ref=dr.get("ref"))
 
-    # ── leaves & attributes ──────────────────────────────────────────
-    for tag_path, val in mapped.items():
-        # skip empties  – they remain “missing / empty” for caller
-        if val in ("", None, []) or isinstance(val, (dict, list)):
-            continue
-
-        if _PATCH_RE.match(str(val)):
-            log.debug("patch object leaked into mapped – %s: %s", tag_path, val)
-            continue
-
-        if "date" in tag_path.lower():
-            value = _to_iso(val)
-            if value is None:
+        # ── leaves & attributes ──────────────────────────────────────────
+        for tag_path, val in mapped.items():
+            # skip empties  – they remain “missing / empty” for caller
+            if val in ("", None, []) or isinstance(val, (dict, list)):
                 continue
 
-        # ① custom metadata
-        if tag_path.startswith("meta:doc:"):
-            name = tag_path.split("meta:doc:", 1)[1]
-            ET.SubElement(
-                doc_elem,
-                "CustomMetadata",
-                name=name,
-                type="xs:string",
-                value=str(val),
-            )
-            continue
+            if _PATCH_RE.match(str(val)):
+                dbg("xml_builder", "Patch object ignored", tag_path)
+                continue
 
-        # 3b) Attribute row  path.@attr
-        if ".@" in tag_path:
-            elem_path, attr = tag_path.split(".@", 1)
-            elem = _ensure_path(root_map, elem_path)
-            elem.set(attr, str(val))
-            continue
+            if "date" in tag_path.lower():
+                value = _to_iso(val)
+                if value is None:
+                    dbg("xml_builder", "Bad date – skipped", tag_path, raw=str(val))
+                    continue
+                val = value
 
-        # 3c) Normal leaf
-        elem = _ensure_path(root_map, tag_path)
-        elem.text = str(val)
+            # ① custom metadata
+            if tag_path.startswith("meta:doc:"):
+                name = tag_path.split("meta:doc:", 1)[1]
+                ET.SubElement(
+                    doc_elem,
+                    "CustomMetadata",
+                    name=name,
+                    type="xs:string",
+                    value=str(val),
+                )
+                continue
+
+            # 3b) Attribute row  path.@attr
+            if ".@" in tag_path:
+                elem_path, attr = tag_path.split(".@", 1)
+                elem = _ensure_path(root_map, elem_path)
+                elem.set(attr, str(val))
+                continue
+
+            # 3c) Normal leaf
+            elem = _ensure_path(root_map, tag_path)
+            elem.text = str(val)
 
 
-    # optional helper: default DocumentReferences when pdf_name provided
-    if pdf_name and "DocumentReferences.DocumentReference" not in mapped:
-        log.debug("PDF name '%s' provided. Adding default DocumentReference.", pdf_name)
-        dr = _ensure_path(root_map, "DocumentReferences.DocumentReference")
-        dr.set("ref", "pdf")
-        dr.text = pdf_name
+        # optional helper: default DocumentReferences when pdf_name provided
+        if pdf_name and "DocumentReferences.DocumentReference" not in mapped:
+            dr = _ensure_path(root_map, "DocumentReferences.DocumentReference")
+            dr.set("ref", "pdf")
+            dr.text = pdf_name
+            dbg("xml_builder", "Inserted default DocumentReference", ref=pdf_name)
 
-    _apply_order(root)
-    xml_bytes = ET.tostring(root, encoding="utf-8", pretty_print=True, xml_declaration=True)
-    log.debug("XML serialization complete. Total size: %d bytes", len(xml_bytes))
-    return xml_bytes
+        _apply_order(root)
+        dbg("xml_builder", "DONE build_updata_xml", bytes=len(ET.tostring(root, encoding="utf-8")))
+
+        # 5) Serialize (pretty print, declaration)
+        return ET.tostring(
+            root, encoding="utf-8", pretty_print=True, xml_declaration=True
+        )
+
+# ─────────────────── XML validation (lxml + XSD) ────────────────────
+@lru_cache(maxsize=1)
+def _get_schema():
+    if not settings.SPEC_XSD.exists():
+        return None
+    return ET.XMLSchema(ET.parse(str(settings.SPEC_XSD)))
 
 def validate_xml(xml_bytes: bytes) -> None:
-    """
-    Validate the given XML bytes against the Updata 2.6.14 XSD.
-    Raises ValueError if invalid; skips if XSD not found.
-    """
-    if not XSD_PATH.exists():
-        log.warning("XSD not found at %s. Skipping XML validation.", XSD_PATH)
+    dbg("xml_builder", "START validate_xml")
+    schema = _get_schema()
+    if schema is None:
+        dbg("xml_builder", "XSD not found – skipping validation", xsd=str(settings.SPEC_XSD))
         return
-
-    if _SCHEMA and not _SCHEMA.validate(ET.fromstring(xml_bytes)):
-        log.error("XML Validation Failed: %s", _SCHEMA.error_log.last_error)
-        raise ValueError(_SCHEMA.error_log.last_error)
-
-    log.debug("XML validation successful against XSD.")
+    doc = ET.fromstring(xml_bytes)
+    if not schema.validate(doc):
+        err = schema.error_log.last_error
+        dbg("xml_builder", "XML validation FAILED", error=str(err))
+        raise ValueError(err)
+    dbg("xml_builder", "XML validation OK")

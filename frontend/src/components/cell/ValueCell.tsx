@@ -1,79 +1,85 @@
-import React from "react";
 import { Autocomplete, TextField } from "@mui/material";
 import type { GridRenderCellParams } from "@mui/x-data-grid";
-import type { Override } from "../../types/mapping";
+import type { MappingRow, Override } from "../../types/mapping";
 
-interface Props extends GridRenderCellParams {
+interface Props extends GridRenderCellParams<any, MappingRow> {
   jsonKeys: string[];
+  tagList: string[];
   json: Record<string, unknown>;
-  onEdit: (tag: string, patch: Override) => void;
+  onEdit: (
+    tag: string,
+    patch: Partial<Override>,
+    touchTemplate?: boolean
+  ) => void;
 }
 
-function ValueCell({ row, jsonKeys, json, onEdit }: Props) {
-  if ((window as any).APP_DEBUG) {
-    console.debug(
-      `[ValueCell] tag=${row.tag} mode=${row.mode} jsonKey=${row.jsonKey} value=${row.value}`
-    );
-  }
+function ValueCell({ row, jsonKeys, tagList, json, onEdit, api }: Props) {
+  const tag = row.tag;
 
-  if (row.category === "group-required" || row.category === "group-optional") {
-    return null; // render empty cell
-  }
+  // --- Render the correct editor based on the row's mode ---
 
-  const tag = row.tag as string;
-
-  /* ---------- Hard-coded mode → plain input ----------------------------- */
-  if (row.mode === "hard") {
+  // Mode 1: Awaiting selection of an Updata Tag to alias
+  if (row.mode === "alias") {
     return (
-      <TextField
-        value={row.value}
+      <Autocomplete
+        options={(tagList || []).filter((t) => t !== tag)}
+        value={row.aliasFor || null}
         size="small"
-        sx={{ minWidth: 180 }}
-        onChange={(e) =>
-          onEdit(tag, {
-            jsonKey: "__hard__",
-            mode: "hard",
-            include: true,
-            value: e.target.value,
-          })
-        }
+        fullWidth
+        autoFocus
+        open
+        onChange={(_, newAliasTag) => {
+          if (newAliasTag) {
+            onEdit(tag, { mode: "alias", aliasFor: newAliasTag }, true);
+            api.stopCellEditMode({ id: row.id, field: "value" });
+          }
+        }}
+        renderInput={(params) => (
+          <TextField {...params} label="Select an output field" />
+        )}
       />
     );
   }
 
-  /* ---------- Pick mode → full autocomplete ---------------------------- */
+  // Mode 2: Awaiting selection of a JSON input key
   if (row.mode === "pick") {
     return (
       <Autocomplete
         options={jsonKeys}
-        size="small"
-        sx={{ minWidth: 180 }}
         value={row.jsonKey || null}
-        onChange={(_, key) =>
-          key &&
-          onEdit(tag, {
-            jsonKey: key,
-            include: true,
-            mode: "real",
-            value: key in json ? String((json as any)[key]) : "",
-          })
-        }
-        renderInput={(p) => <TextField {...p} />}
+        size="small"
+        fullWidth
+        autoFocus
+        open
+        onChange={(_, newJsonKey) => {
+          if (newJsonKey) {
+            onEdit(tag, { mode: "real", jsonKey: newJsonKey }, true);
+            api.stopCellEditMode({ id: row.id, field: "value" });
+          }
+        }}
+        renderInput={(params) => (
+          <TextField {...params} label="Select an input field" />
+        )}
       />
     );
   }
 
-  /* ---------- Default (read-only) -------------------------------------- */
+  // Mode 3: Awaiting a hard-coded value
+  if (row.mode === "hard") {
+    return (
+      <TextField
+        value={row.value}
+        onChange={(e) => onEdit(tag, { mode: "hard", value: e.target.value })}
+        onBlur={() => api.stopCellEditMode({ id: row.id, field: "value" })}
+        size="small"
+        fullWidth
+        autoFocus
+      />
+    );
+  }
+
+  // Default ("real" mode): Just display the final value, not editable.
   return <span>{row.value}</span>;
 }
 
-/* ----  Memoise so unchanged rows don’t re-render -------------------- */
-function areEqual(prev: Props, next: Props) {
-  return (
-    prev.row.jsonKey === next.row.jsonKey &&
-    prev.row.mode === next.row.mode &&
-    prev.row.value === next.row.value
-  );
-}
-
-export default React.memo(ValueCell, areEqual);
+export default ValueCell; // No need for memo, it's an interactive cell

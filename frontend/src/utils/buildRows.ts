@@ -1,4 +1,4 @@
-import type { MappingRow } from "../types/mapping";
+import type { MappingRow, RowMode } from "../types/mapping";
 import type { Override } from "../types/mapping";
 import { categoriseRow } from "./categoriseRow";
 import { debug } from "./debug";
@@ -24,20 +24,19 @@ interface Params {
   warnMissing?: boolean; // show ⚠️ when jsonKey ≠ "" but missing in the current JSON
 }
 
+// A simple memoization helper to prevent needless re-renders of unchanged rows.
 function reuseRow(prev: Map<string, MappingRow>, next: MappingRow): MappingRow {
   const old = prev.get(`${next.tag}::${next.id}`);
-  const sameXform =
-    (old?.xform?.length || 0) === (next.xform?.length || 0) &&
-    JSON.stringify(old?.xform) === JSON.stringify(next.xform);
-
-  return old &&
+  const isUnchanged =
+    old &&
     old.jsonKey === next.jsonKey &&
     old.value === next.value &&
     old.mode === next.mode &&
     old.include === next.include &&
-    sameXform
-    ? old // reuse → avoids needless re-renders
-    : next; // xform changed → return fresh object
+    old.aliasFor === next.aliasFor &&
+    JSON.stringify(old.xform) === JSON.stringify(next.xform);
+
+  return isUnchanged ? old : next;
 }
 
 export function buildRows(
@@ -61,134 +60,123 @@ export function buildRows(
 
   debug("buildRows", "REBUILD");
 
-  // Helper: push a row keeping everything uniform
-  const push = (r: Partial<MappingRow>) => {
-    /* ① determine the definitive category once */
-    const category =
-      r.category ??
-      categoriseRow(
-        r.tag!,
-        r.jsonKey ?? "",
-        required,
-        conditional,
-        parentReq,
-        parentOpt,
-        warnMissing
-      );
-
-    /* ② mandatory rows are *always* included unless the user
-          explicitly disabled them via overrides */
-    const includeDefault =
-      r.include ?? (category === "required" || category === "parent-required");
-
-    rows.push(
-      reuseRow(prevMap, {
-        id: r.id ?? orderMap[r.tag!] ?? Number.MAX_SAFE_INTEGER,
-        tag: r.tag!, // ← always set
-        jsonKey: r.jsonKey ?? "",
-        include: includeDefault,
-        value: r.value ?? "",
-        touched: r.touched ?? false,
-        category,
-        warning: r.warning,
-        mode: r.mode ?? "real",
-        xform: r.xform,
-      })
-    );
-  };
-
-  // ─── Loop over every canonical tag in CSV order ─────────────────────────
+  // --- Main loop to build all standard Updata rows ---
   tagList.forEach((tag) => {
-    // ⛔️ nothing to show?  jump to next tag
-    const ov = overrides?.[tag];
+    const ov = overrides[tag];
+    const isParent = parentReq.has(tag) || parentOpt.has(tag);
 
-    // 1) user override → wins
+    // Step 1: Determine the row's complete state from a clear priority list.
+    let mode: RowMode = "real";
+    let jsonKey = "";
+    let value = "";
+    let include = false;
+    let xform = ov?.xform;
+    let touched = false;
+
     if (ov) {
-      const warning = ov.mode === "pick" && !(ov.jsonKey in json);
-      /* raw before transform */
-      const raw =
-        ov.mode === "hard" ? ov.value : String(json[ov.jsonKey] ?? "");
-
-      /* final value shown in the grid */
-      const final =
-        ov.xform && ov.xform.length
-          ? applyTransformChain(ov.xform, raw, { json })
-          : raw;
-
-      push({
-        tag,
-        jsonKey: ov.jsonKey,
-        include: ov.include,
-        value: final,
-        touched: true,
-        warning: warning ? true : false,
-        mode: ov.mode,
-        xform: ov.xform, // ★ expose to the grid
-      });
-      return;
-    }
-
-    // 2) parent rows
-    if (parentReq.has(tag)) {
-      push({
-        tag,
-        include: true,
-        jsonKey: "",
-        value: "",
-        mode: "real",
-        category: "parent-required",
-      });
-      return;
-    }
-    if (parentOpt.has(tag)) {
-      push({
-        tag,
-        include: false,
-        jsonKey: "",
-        value: "",
-        mode: "real",
-        category: "parent-optional",
-      });
-      return;
-    }
-
-    // 3) untouched tag → backend top suggestion / hard default
-    const top = backendSuggest[tag]?.[0];
-    if (top) {
-      push({
-        tag,
-        jsonKey: top[0],
-        value: String(json[top[0]] ?? ""),
-        mode: "real",
-      });
-    } else if (backendMapped[tag] !== undefined) {
-      push({
-        tag,
-        jsonKey: "__hard__",
-        value: String(backendMapped[tag]),
-        mode: "hard",
-      });
+      // Priority 1: A user override exists.
+      touched = true;
+      mode = ov.mode;
+      jsonKey = ov.jsonKey;
+      include = ov.include;
+      const rawValue = mode === "hard" ? ov.value : String(json[jsonKey] ?? "");
+      value = xform ? applyTransformChain(xform, rawValue, { json }) : rawValue;
+    } else if (isParent) {
+      // Priority 2: It's a parent tag.
+      include = parentReq.has(tag); // Include if it's a required parent
     } else {
-      push({ tag }); // empty row
+      // Priority 3: Use backend suggestions or defaults.
+      const topSuggestion = backendSuggest[tag]?.[0]?.[0];
+      if (topSuggestion) {
+        jsonKey = topSuggestion;
+        value = String(json[jsonKey] ?? "");
+      } else if (backendMapped[tag] !== undefined) {
+        mode = "hard";
+        value = String(backendMapped[tag]);
+      }
     }
+
+    // Step 2: Determine the category based on the resolved state.
+    // This was a critical piece of missing logic.
+    const category = categoriseRow(
+      tag,
+      jsonKey,
+      required,
+      conditional,
+      parentReq,
+      parentOpt,
+      warnMissing
+    );
+    const warning = !!(mode !== "hard" && jsonKey && !(jsonKey in json));
+
+    // Step 3: Set default inclusion if no override exists.
+    if (!ov) {
+      include = category === "required" || category === "parent-required";
+    }
+
+    // Step 4: Create the final row object.
+    const newRow: MappingRow = {
+      id: orderMap[tag] ?? Number.MAX_SAFE_INTEGER,
+      tag,
+      depth: tag.split(".").length - 1,
+      mode,
+      jsonKey,
+      value,
+      include,
+      xform,
+      touched,
+      warning,
+      category,
+      preview: "", // preview is not used, can be removed if desired
+    };
+    rows.push(reuseRow(prevMap, newRow));
   });
 
-  /* ─── Clone the real DocumentReference row into an alias on top ─── */
-  {
-    const idx = rows.findIndex(
+  const pdfNameOverride = overrides["_pdf_name"];
+
+  let initialMode: RowMode = "alias"; // Default to aliasing the DocumentReference
+  let initialJsonKey = "__alias__";
+  let initialValue = "";
+  let initialAliasFor = "DocumentReferences.DocumentReference";
+
+  if (pdfNameOverride) {
+    // If an override exists, it dictates our state.
+    initialMode = pdfNameOverride.mode;
+    initialAliasFor = pdfNameOverride.aliasFor ?? "";
+    initialJsonKey = pdfNameOverride.jsonKey;
+
+    if (pdfNameOverride.mode === "alias" && initialAliasFor) {
+      const sourceRow = rows.find((r) => r.tag === initialAliasFor);
+      initialValue = sourceRow?.value ?? "[Alias not found]";
+    } else if (pdfNameOverride.mode === "real" && initialJsonKey) {
+      initialValue = String(json[initialJsonKey] ?? "");
+    } else {
+      // mode === 'hard'
+      initialValue = pdfNameOverride.value;
+    }
+  } else {
+    // Default behavior: The filename is an alias of DocumentReference.
+    const docRefRow = rows.find(
       (r) => r.tag === "DocumentReferences.DocumentReference"
     );
-    if (idx !== -1) {
-      const base = rows[idx];
-      const alias: MappingRow = {
-        ...base,
-        id: base.id - 0.001, // always sorts right before canonical row
-        category: "filename", // drives “first row” in the sorter
-        label: "Output filename (PDF)",
-      };
-      rows.unshift(alias); // put at absolute top
-    }
+    initialValue = docRefRow?.value ?? "";
   }
+
+  const filenameRow: MappingRow = {
+    id: -1, // Sorts to the top
+    tag: "_pdf_name",
+    label: "Output filename (PDF)",
+    category: "filename",
+    jsonKey: initialJsonKey,
+    mode: initialMode,
+    value: sanitizeStem(initialValue),
+    aliasFor: initialAliasFor,
+    include: true,
+    touched: !!pdfNameOverride,
+    preview: "",
+    warning: false,
+  };
+  rows.push(reuseRow(prevMap, filenameRow));
 
   // ─── Insert phantom “+ Add metadata (Document)” row ───────────────
   if (!rows.some((r) => r.tag.startsWith("+  Add metadata"))) {
@@ -207,17 +195,31 @@ export function buildRows(
         touched: false,
         category: "parent-optional",
         warning: false,
+        preview: "",
       })
     );
   }
 
-  // Final sort by id (mostly already sorted, but meta rows may shift)
   // Final sort – filename row first, then by id
   const sorted = rows.sort((a, b) => {
-    if (a.category === "filename" && b.category !== "filename") return -1;
-    if (b.category === "filename" && a.category !== "filename") return 1;
-    return a.id - b.id;
+    const idA = a.id ?? Number.MAX_SAFE_INTEGER;
+    const idB = b.id ?? Number.MAX_SAFE_INTEGER;
+    return idA - idB;
   });
+
+  // For debugging: you can temporarily uncomment this to see the generated IDs.
+  // if (sorted.length > 0 && prevRows?.length === 0) {
+  //   console.log("Generated row IDs:", sorted.map(r => ({ tag: r.tag, id: r.id })));
+  // }
+
   debug("buildRows", "rows changed:", sorted.length - prevMap.size);
   return sorted;
 }
+// Helper to sanitize the filename
+const sanitizeStem = (value: unknown): string => {
+  const str = String(value ?? "");
+  if (str.toLowerCase().endsWith(".pdf")) {
+    return str.slice(0, -4);
+  }
+  return str;
+};

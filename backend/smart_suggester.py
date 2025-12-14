@@ -27,15 +27,15 @@ The class has **no** FastAPI / Pydantic ties – unit‑test standalone.
 """
 from __future__ import annotations
 
-import logging, re, datetime as _dt
+import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from rapidfuzz import fuzz
 
-from datetime import datetime as _dt, date as _date
-import typing as _t
 from backend.date_utils import looks_like_date as _is_date
+from backend.logging_config import dbg, thread_local
+from backend.settings import get_settings
 
 # MiniLM is optional – import guarded
 try:
@@ -44,7 +44,7 @@ except ImportError:
     SentenceTransformer = None  # type: ignore
     util = None  # type: ignore
 
-_log = logging.getLogger(__name__)
+settings = get_settings()
 
 # ────────────────────────────────────────────────────────────────────
 class SmartSuggester:
@@ -68,27 +68,40 @@ class SmartSuggester:
         alias_map: Dict[str, Sequence[str]],
         alias_rev: Dict[str, str],
         *,
-        fuzzy_threshold: int = 70,
+        fuzzy_threshold: int | None = None,
         enable_semantic: bool = True,
-        model_name: str = "sentence-transformers/paraphrase-MiniLM-L3-v2",
+        model_name: str | None = None,
     ) -> None:
-        self.canonical = list(canonical)
-        self.alias_map = {k: list(v) for k, v in alias_map.items()}
-        self.alias_rev = alias_rev
+        # ── resolve defaults FIRST ───────────────────────────────────
+        if fuzzy_threshold is None:
+            fuzzy_threshold = settings.FUZZY_THRESHOLD
+        if model_name is None:
+            model_name = settings.SEMANTIC_MODEL_NAME
+
+        # ── core fields ──────────────────────────────────────────────
+        self.canonical      = list(canonical)
+        self.alias_map      = {k: list(v) for k, v in alias_map.items()}
+        self.alias_rev      = alias_rev
         self.fuzzy_threshold = fuzzy_threshold
 
-        # cross‑file frequency memory: key → hits
+        # cross-file key frequency
         self.freq: defaultdict[str, int] = defaultdict(int)
 
         # semantic bits (lazy)
-        self._semantic_on  = enable_semantic and SentenceTransformer is not None
-        _log.debug(
-            "[SmartSuggester] semantic_on=%s (enable_semantic=%s, SentenceT=%s)",
-            self._semantic_on, enable_semantic, SentenceTransformer is not None,
-        )
-        self._model        = None
+        self._semantic_on = enable_semantic and SentenceTransformer is not None
+        self._model_name  = model_name
+        self._model       = None
         self._tag_vecs: Dict[str, Any] = {}
-        self._model_name   = model_name
+
+        # ── contextual log once everything exists ───────────────────
+        thread_local.log_context_filename = "__suggester__"
+        dbg(
+            "smart_suggester",
+            "INIT",
+            fuzzy=self.fuzzy_threshold,
+            semantic_on=self._semantic_on,
+            model=self._model_name,
+        )
 
     # ─── public helpers ────────────────────────────────────────────
     def suggest(
@@ -102,7 +115,7 @@ class SmartSuggester:
 
         level = level.lower()
         if level not in {"fast", "normal", "deep"}:
-            _log.warning("unknown level '%s' → falling back to 'normal'", level)
+            dbg("smart_suggester", "unknown level → falling back to 'normal'", level)
             level = "normal"
 
         use_fuzzy     = level in {"normal", "deep"}
@@ -113,7 +126,7 @@ class SmartSuggester:
         # ── lazy‑load MiniLM only if really needed ─────────────────
         if use_semantic and self._model is None:
             try:
-                _log.debug("[SmartSuggester] downloading MiniLM … (only once)")
+                dbg("smart_suggester", "Downloading MiniLM", model=self._model_name)
                 from sentence_transformers import SentenceTransformer  # type: ignore  # pylint: disable=import-error
 
                 self._model = SentenceTransformer(self._model_name)
@@ -121,9 +134,9 @@ class SmartSuggester:
                     t: self._model.encode(t, convert_to_tensor=True)
                     for t in self.canonical
                 }
-                _log.debug("[SmartSuggester] MiniLM ready – deep suggestions enabled")
+                dbg("smart_suggester", "MiniLM ready – deep suggestions enabled")
             except Exception as exc:  # noqa: BLE001
-                _log.warning("MiniLM load failed → deep mode degraded (%s)", exc)
+                dbg("smart_suggester", "MiniLM load failed", error=str(exc))
                 use_semantic = False
         else:
             # ── semantic disabled – log *why* ──────────────────────
@@ -132,11 +145,10 @@ class SmartSuggester:
                     f"level={level} (!= deep)" if level != "deep" else
                     "semantic_on False (disabled or sentence-transformers missing)"
                 )
-                _log.debug("[SmartSuggester] semantic skipped → %s", reason)
+                dbg("smart_suggester", "Semantic skipped", reason=reason)
 
         flat_keys = list(self._flatten_json(data))
-        if _log.isEnabledFor(logging.DEBUG):
-            _log.debug("JSON keys (flattened) → %s", flat_keys)
+        dbg("smart_suggester", "Flattened keys", keys=flat_keys)
         san_map   = {k: self._sanitize(k) for k in flat_keys}
         norm_map  = {k: self._normalize(k) for k in flat_keys}
 
@@ -147,8 +159,7 @@ class SmartSuggester:
                 k: self._model.encode(k, convert_to_tensor=True) for k in flat_keys
             }
 
-        _log.debug("suggest(level=%s, fuzzy=%s, semantic=%s, keys=%d)",
-                   level, use_fuzzy, use_semantic, len(flat_keys))
+        dbg("smart_suggester", "START suggest", level=level, keys=len(flat_keys), fuzzy=use_fuzzy, semantic=use_semantic)
 
         out: Dict[str, List[Tuple[str, int]]] = {}
         for tag in self.canonical:
@@ -197,8 +208,6 @@ class SmartSuggester:
                             reason += " +semantic"
 
                 ranked.append((k, int(score)))
-                # if _log.isEnabledFor(logging.DEBUG):
-                #     _log.debug("  %-35s → %-30s : %3d  (%s)", k, tag, score, reason)
 
             out[tag] = sorted(ranked, key=lambda kv: -kv[1])[:top_n]
         return out
@@ -242,9 +251,9 @@ class SmartSuggester:
         if cur is None:
             return 0
         if _is_date(cur) and tag.lower().endswith("date"):
-            _log.debug("[Mapper] date-detect: '%s'→ fallback DocumentDate", key)
+            dbg("smart_suggester", "fallback DocumentDate", key)
             return 15
         if isinstance(cur, (int, float)) and any(w in tag.lower() for w in ("amount", "total", "sum")):
-            _log.debug("[Mapper] numeric-detect: '%s'→ fallback Amount/Total", key)
+            dbg("smart_suggester", "fallback Amount/Total", key)
             return 10
         return 0

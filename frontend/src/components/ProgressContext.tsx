@@ -1,12 +1,10 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
 import {
-  Backdrop,
-  Box,
-  Typography,
-  LinearProgress,
-  IconButton,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
+  createContext,
+  useContext,
+  useState,
+  useRef,
+  type ReactNode,
+} from "react";
 
 /* ───────── types ───────── */
 type Mode = "idle" | "running" | "error" | "done";
@@ -34,7 +32,17 @@ export interface ProgressAPI {
   dismiss: () => void;
   /** true while visible */
   active: boolean;
+  // NEW: expose state for inline rendering
+  mode: Mode;
+  pct: number;
+  label: string;
+  max: number;
   cur: number;
+  /** cancel current run */
+  cancel: () => void;
+  /** AbortSignal to pass to axios */
+  readonly signal: AbortSignal;
+  setCancelHandler: (fn: (() => Promise<void> | void) | null) => void;
 }
 
 const Ctx = createContext<ProgressAPI | null>(null);
@@ -48,9 +56,11 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
     max: 0,
     cur: 0,
   });
+  const controllerRef = useRef<AbortController>(new AbortController());
 
   /* helpers */
-  const start: ProgressAPI["start"] = (total, first = "") =>
+  const start: ProgressAPI["start"] = (total, first = "") => {
+    controllerRef.current = new AbortController();
     setState({
       pct: total ? 0 : -1, // indeterminate if 0
       label: first,
@@ -58,7 +68,7 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       max: total,
       cur: 0,
     });
-
+  };
   /* update label only ------------------------------------------------ */
   const setLabel: ProgressAPI["setLabel"] = (lbl) =>
     setState((s) => ({ ...s, label: lbl }));
@@ -97,6 +107,31 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
   const dismiss: ProgressAPI["dismiss"] = () =>
     setState((s) => ({ ...s, mode: "idle" }));
 
+  const cancelHandlers = useRef<(() => Promise<void> | void) | null>(null);
+
+  const cancel: ProgressAPI["cancel"] = async () => {
+    // ✅ Show immediate feedback to the user
+    setState((s) => ({ ...s, mode: "running", label: "Cancelling..." }));
+
+    controllerRef.current.abort(); // Abort client-side network requests
+
+    try {
+      // ✅ Ask backend to stop and wait for the request to complete
+      await cancelHandlers.current?.();
+    } catch (e) {
+      console.warn("Cancel request failed", e);
+    } finally {
+      // ✅ Now, dismiss the progress bar
+      cancelHandlers.current = null; // Clear the handler
+      setState((s) => ({ ...s, mode: "idle" }));
+    }
+  };
+
+  // expose a setter so batchTransform can register the backend kill
+  function setCancelHandler(fn: (() => Promise<void> | void) | null) {
+    cancelHandlers.current = fn;
+  }
+
   const api: ProgressAPI = {
     start,
     setLabel,
@@ -105,11 +140,20 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
     done,
     error,
     dismiss,
+    cancel,
+    get signal() {
+      return controllerRef.current.signal;
+    },
     active: state.mode !== "idle",
+    // expose state
+    mode: state.mode,
+    pct: state.pct,
+    label: state.label,
+    max: state.max,
     cur: state.cur,
+    setCancelHandler,
   };
 
-  /* UI colours */
   const barColor =
     state.mode === "error"
       ? "error"
@@ -117,34 +161,7 @@ export function ProgressProvider({ children }: { children: ReactNode }) {
       ? "success"
       : "primary";
 
-  return (
-    <Ctx.Provider value={api}>
-      <Backdrop sx={{ color: "#fff", zIndex: 2000 }} open={api.active}>
-        <Box sx={{ width: 380, p: 2 }}>
-          <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-            <Typography>
-              {state.label}{" "}
-              {state.mode === "running" && `(${state.cur}/${state.max})`}
-            </Typography>
-            {(state.mode === "error" || state.mode === "done") && (
-              <IconButton onClick={dismiss} size="small" sx={{ color: "#fff" }}>
-                <CloseIcon fontSize="small" />
-              </IconButton>
-            )}
-          </Box>
-
-          <LinearProgress
-            sx={{ mt: 1 }}
-            variant={state.pct < 0 ? "indeterminate" : "determinate"}
-            value={state.pct < 0 ? 0 : state.pct}
-            color={barColor}
-          />
-        </Box>
-      </Backdrop>
-
-      {children}
-    </Ctx.Provider>
-  );
+  return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }
 
 /* ───────── hook ───────── */

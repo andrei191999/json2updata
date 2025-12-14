@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, date, timezone
 from typing import Any, Optional
-from backend.logging_config import dbg, thread_local
+from backend.logging_config import dbg
 from backend.settings       import get_settings
 
 settings = get_settings()
@@ -81,12 +81,12 @@ def to_iso(val: Any) -> Optional[str]:
         except ValueError:
             return None
     if _RE_DDMMYY.match(s):
-        date = datetime.strptime(s, "%d%m%y").date()
-        if date.year < 1990:
+        dt = datetime.strptime(s, "%d%m%y").date()
+        if dt.year < 1990:
             return None
 
-        dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=date.isoformat())
-        return date.isoformat()
+        dbg("date_utils", "Parsed date via YYYYMMDD", raw=s, parsed=dt.isoformat())
+        return dt.isoformat()
 
     # fallback humane forms
     for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%m-%d-%Y"):

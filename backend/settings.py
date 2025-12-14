@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
     # ── Logging toggles ────────────────────────────────────────────
     LOG_LEVEL: str       = "DEBUG"         # root threshold
-    LOG_VERBOSE: bool    = False          # enable backend.debug.log?
+    LOG_VERBOSE: bool    = True          # enable backend.debug.log?
     LOG_INCLUDE: str     = ""             # comma-list of logger globs to keep
     LOG_EXCLUDE: str     = ""             # comma-list of logger globs to drop
     LOG_JSON: bool       = True           # write logs in JSON format?
@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # ── File / path constants ──────────────────────────────────────
     SPEC_CSV: Path       = PROJECT_ROOT / "resources" / "updata-2.6.14.csv"
     DEFAULTS_YAML: Path  = PROJECT_ROOT / "resources" / "defaults.yaml"
+    SPEC_XSD: Path        = PROJECT_ROOT / "resources" / "updata-2.6.14.xsd"
+    SPEC_XLSX: Path       = PROJECT_ROOT / "resources" / "updata-2.6.14.xlsx"
+    FLAT_SPEC_CSV: Path   = PROJECT_ROOT / "resources" / "updata-2.6.14-flat.csv"
     INPUT_DIR: Path      = PROJECT_ROOT / "input"
     OUTPUT_DIR: Path     = PROJECT_ROOT / "output"
     PDF_STORAGE_DIR: Path = PROJECT_ROOT / "pdf_storage"
@@ -31,6 +34,8 @@ class Settings(BaseSettings):
     CPU_CORES: int       = os.cpu_count() or 4
     MAX_PARALLEL: int    = min(8, (os.cpu_count() or 4) * 2)
     CHUNK_SIZE: int      = 250
+    FUZZY_THRESHOLD: int = 77
+    SEMANTIC_MODEL_NAME: str = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 
     # ── Runtime progress state ────────────────────────────────────
     # These are mutated at runtime; they cannot be BaseSettings fields.

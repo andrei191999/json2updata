@@ -1,14 +1,14 @@
 import asyncio
 import logging
-import os
 import sys
 import threading
 import logging.handlers
 import json
 from fnmatch import fnmatch
-from pathlib import Path
 from typing import Any, Dict
 from collections import deque
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 # ----------------------------------------------------------
 # Central settings
@@ -29,6 +29,22 @@ class ContextFilter(logging.Filter):
         record.user = getattr(thread_local, "log_context_user", None)
         return True
 
+@contextmanager
+def file_log_context(name: str | None):
+    """
+    Temporarily set the per-thread filename context so logs
+    appear under the 'Files' tab in the UI. Always clears.
+    """
+    old = getattr(thread_local, "log_context_filename", None)
+    if name:
+        thread_local.log_context_filename = name
+    try:
+        yield
+    finally:
+        if name:
+            # restore previous context (or clear)
+            thread_local.log_context_filename = old
+
 # ----------------------------------------------------------
 # WebSocket handler for UI console
 # ----------------------------------------------------------
@@ -40,11 +56,12 @@ class WebSocketDebugHandler(logging.Handler):
     It runs in a separate thread from the main application, so it must use thread-safe methods.
     """
     def emit(self, record: logging.LogRecord) -> None:
-        if not EVENT_LOOP:
+        loop = EVENT_LOOP
+        if not loop:
             return
 
-        subs = getattr(EVENT_LOOP, "_debug_subscribers", None)
-        if not subs:
+        subscribers: set[asyncio.Queue] = getattr(loop, "_debug_subscribers", set())
+        if not subscribers:
             return
 
         log_data: Dict[str, Any] = {
@@ -57,14 +74,20 @@ class WebSocketDebugHandler(logging.Handler):
         }
         LAST_LOGS.append(log_data)
 
+        # executed on the loop thread; swallow QueueFull here
+        def _safe_put(q: asyncio.Queue, item: dict):
+            try:
+                q.put_nowait(item)
+            except asyncio.QueueFull:
+                # drop silently; optionally count drops somewhere
+                pass
+
         try:
-            for q in subs:
-                EVENT_LOOP.call_soon_threadsafe(q.put_nowait, log_data)
-        except Exception:
-            # CRITICAL: If an error happens inside a logging handler, we CANNOT use
-            # the logger (e.g., `dbg()`) to report it, as that would cause an infinite loop.
-            # We must write directly to the standard error stream.
-            print(f"[WebSocketHandler] ERROR pushing log: {sys.exc_info()[1]}", file=sys.stderr)
+            for q in list(subscribers):
+                loop.call_soon_threadsafe(_safe_put, q, log_data)
+        except Exception as e:
+            # never log via logging here—write straight to stderr
+            print(f"[Log Handler] error while scheduling WS log: {e}", file=sys.stderr)
 
 def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     """Call this from api.py after you start the uvicorn loop."""
@@ -76,6 +99,11 @@ def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
 # ----------------------------------------------------------
 if settings.LOG_JSON:
     class JsonFormatter(logging.Formatter):
+        def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+            # local time with millisecond precision, ISO 8601
+            dt = datetime.fromtimestamp(record.created)
+            return dt.isoformat(timespec="milliseconds")
+
         def format(self, record: logging.LogRecord) -> str:
             payload: Dict[str, Any] = {
                 "timestamp": self.formatTime(record, self.datefmt),
@@ -85,11 +113,12 @@ if settings.LOG_JSON:
                 "file": getattr(record, "fileNameFromContext", None),
                 "user": getattr(record, "user", None),
             }
+            # allow structured extras: log.debug("msg", extra={"foo": 1})
             if isinstance(record.args, dict):
                 payload.update(record.args)
-            return json.dumps(payload)
+            return json.dumps(payload, ensure_ascii=False)
 
-    formatter = JsonFormatter(datefmt="%Y-%m-%d %H:%M:%S.%f")
+    formatter = JsonFormatter()
 else:
     formatter = logging.Formatter(
         "%(asctime)s %(levelname).1s [%(name)s] %(message)s",
@@ -143,6 +172,10 @@ def setup_logging() -> None:
     info_h.setFormatter(formatter)
     root.addHandler(info_h)
 
+    # Mute 3rd-party noisy loggers even when root is DEBUG
+    for noisy in ("uvicorn", "uvicorn.error", "uvicorn.access", "websockets", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Optional DEBUG file
     if settings.LOG_VERBOSE:
         debug_path = settings.LOG_DIR / "backend.debug.log"
@@ -166,3 +199,29 @@ def dbg(tag: str, *parts: Any, **kwargs: Any) -> None:
         return
     msg = " ".join(map(str, parts))
     logging.getLogger(tag).debug(msg, extra=kwargs)
+
+
+@contextmanager
+def file_context(name: str | None):
+    old = getattr(thread_local, "log_context_filename", None)
+    thread_local.log_context_filename = name
+    try:
+        yield
+    finally:
+        thread_local.log_context_filename = old
+
+
+def set_log_level(level_name: str) -> bool:
+    """Dynamically change the root logger's level."""
+    level_name = level_name.upper()
+    level = getattr(logging, level_name, None)
+
+    if not isinstance(level, int):
+        logging.getLogger("api.log_level").error(f"Invalid log level requested: {level_name}")
+        return False
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Log the change at a high level so it's always visible
+    logging.getLogger("api.log_level").warning(f"Log level changed to {level_name}")
+    return True

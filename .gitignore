@@ -5,6 +5,29 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 *.egg-info/
+.venv/
+venv/
+env/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
 ###############################################################################
 # 2. Node / front-end artefacts
@@ -13,6 +36,8 @@ frontend/node_modules/
 frontend/dist/
 dist-ssr/
 *.local
+.env.local
+.env.*.local
 
 ###############################################################################
 # 3. Logs
@@ -63,3 +88,13 @@ pytest.ini
 *.njsproj
 *.sln
 *.sw?
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.iml
+.env
+.env.local
+.env.*.local

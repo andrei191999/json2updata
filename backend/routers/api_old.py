@@ -12,13 +12,9 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import gzip
-import hashlib
 import json
 import os
 import shutil
-import zipfile
-import time
-import threading
 from datetime import datetime
 from functools import partial
 from enum import Enum
@@ -32,7 +28,6 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from xml.dom import minidom
 
 # --- Modular Logging Import ---
 from backend.logging_config import setup_logging, set_event_loop, dbg, thread_local, LAST_LOGS
@@ -51,7 +46,6 @@ from backend.spec_parser import (
 
 # --- Initial Setup ---
 setup_logging() # Configure all logging handlers on import
-set_event_loop(asyncio.get_event_loop())
 settings = get_settings()
 
 # --- WebSocket state is owned exclusively by api.py ---
@@ -92,47 +86,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Helper Functions ---
-def _resolve_inside_project(folder: str | None, *, fallback: Path) -> Path:
-    """
-    Resolve *folder* under PROJECT_ROOT, preventing “..” escapades.
-    If *folder* is None/empty, return *fallback*.
-    """
-    if (
-        not folder
-        or folder.startswith("__server")
-        or folder == "__client__"
-    ):
-        return fallback
-    p = (settings.PROJECT_ROOT / folder).resolve()
-    # A bit of a hack to allow paths inside the project root, should be fine for local dev
-    if settings.PROJECT_ROOT.as_posix() not in p.as_posix():
-        raise HTTPException(400, f"Illegal folder path: {folder}")
-    p.mkdir(exist_ok=True)
-    return p
-
-def hash_fileobj(fobj):
-    h = hashlib.sha256()
-    for chunk in iter(lambda: fobj.read(8192), b""):
-        h.update(chunk)
-    fobj.seek(0)
-    return h.hexdigest()
-
-def _safe_unlink(p: Path) -> None:
-    """Retry-unlink on Windows to avoid WinError 32."""
-    for _ in range(3):
-        try:
-            p.unlink(missing_ok=True)
-            return
-        except PermissionError:      # file still in use → wait & retry
-            time.sleep(0.1)
-
-def _pretty(xml_bytes: bytes, max_len: int = 4000) -> str:
-    txt = minidom.parseString(xml_bytes).toprettyxml()
-    return txt[:max_len] + "…" if len(txt) > max_len else txt
-
 def make_mapper() -> Mapper:
-    return Mapper(spec_path=settings.SPEC_CSV, defaults_path=settings.DEFAULTS_YAML, fuzzy_threshold=70)
+    return Mapper(spec_path=settings.SPEC_CSV, defaults_path=settings.DEFAULTS_YAML, fuzzy_threshold=settings.FUZZY_THRESHOLD)
 
 CURRENT_MAPPER = make_mapper()
 # --- WebSocket Endpoints ---
@@ -189,7 +144,7 @@ async def stream_progress(ws: WebSocket, pid: str):
 
 
 @app.get("/api/files", response_model=List[str])
-def list_files(dir: str = Query(default="input")):
+def list_files(dir: str = Query(default=settings.INPUT_DIR.name)):
     dbg("api.files", f"Request to list files in directory: '{dir}'")
     folder = (settings.PROJECT_ROOT / dir).resolve()
     if not folder.exists():
@@ -200,7 +155,7 @@ def list_files(dir: str = Query(default="input")):
     return files
 
 @app.get("/api/file/{fname}")
-def get_file(fname: str, dir: str = Query(default="input")):
+def get_file(fname: str, dir: str = Query(default=settings.INPUT_DIR.name)):
     file_path = (settings.PROJECT_ROOT / dir / fname).resolve()
     if not file_path.exists():
         raise HTTPException(404, "file not found")
@@ -430,7 +385,8 @@ def _build_one(
 
         xml_bytes  = build_updata_xml(mapped, pdf_name)
         try:
-            validate_xml(xml_bytes); valid, msg = True, "ok"
+            validate_xml(xml_bytes);
+            valid, msg = True, "ok"
         except Exception as exc:               # noqa: BLE001
             valid, msg = False, str(exc)
 

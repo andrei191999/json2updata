@@ -1,27 +1,30 @@
-import React, { memo, useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   FixedSizeGrid as Grid,
   type GridChildComponentProps,
 } from "react-window";
-import { Checkbox, ListItemText, Box, ListItemIcon } from "@mui/material";
+import { ListItemText, Box, Tooltip } from "@mui/material";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import { useTheme } from "@mui/material/styles";
 
 interface Props {
   files: string[];
   height: number;
   width: number;
-  rowHeight?: number; // defaults 28
+  rowHeight?: number; // defaults 33
   current: string | null;
   selectedSet: Set<string>;
-  onToggle: (f: string, c: boolean) => void;
+  onToggleSelection: (f: string) => void;
   onPreview: (f: string) => void;
 }
 
 // This type will be passed to every Cell as `props.data`
 interface CellData {
   files: string[];
+  current: string | null;
   selectedSet: Set<string>;
-  onToggle: (f: string, c: boolean) => void;
   onPreview: (f: string) => void;
+  onToggleSelection: (f: string) => void;
   cols: number;
 }
 
@@ -29,20 +32,22 @@ export default function VirtualFileGrid({
   files,
   height,
   width,
-  rowHeight = 33,
+  rowHeight = 48,
   current,
   selectedSet,
-  onToggle,
   onPreview,
+  onToggleSelection,
 }: Props) {
-  const cols = 2; // 🔸 fixed two-column grid
-  const columnWidth = width / cols; // 50 % of available space
+  const cols = width > 400 ? 2 : 1;
+  const columnWidth = width / cols;
   const rows = Math.ceil(files.length / cols);
-  // We pass everything the Cell needs down as `itemData`
+
   const itemData = useMemo<CellData>(
-    () => ({ files, selectedSet, onToggle, onPreview, cols }),
-    [files.length, selectedSet, onToggle, onPreview, cols]
+    () => ({ files, selectedSet, onPreview, onToggleSelection, cols, current }),
+    [files, selectedSet, onPreview, onToggleSelection, cols, current]
   );
+
+  // --- NEW: Cell component rewritten for new UX ---
   const Cell = memo(
     ({
       columnIndex,
@@ -50,55 +55,87 @@ export default function VirtualFileGrid({
       style,
       data,
     }: GridChildComponentProps<CellData>) => {
-      const { files, selectedSet, onToggle, onPreview, cols } = data;
+      const theme = useTheme();
+      const {
+        files,
+        selectedSet,
+        onPreview,
+        onToggleSelection,
+        cols,
+        current,
+      } = data;
       const idx = rowIndex * cols + columnIndex;
       if (idx >= files.length) return null;
+
       const f = files[idx];
-      const checked = selectedSet.has(f);
-      const isPreview = f === current;
+      const isSelected = selectedSet.has(f);
+      const isCurrent = current === f;
+
+      const handleInteraction = () => {
+        onPreview(f);
+        onToggleSelection(f);
+      };
+
+      const getBackgroundColor = () => {
+        if (isSelected) return `${theme.palette.primary.main}40`;
+        return "transparent";
+      };
 
       return (
-        <Box
-          component="div"
-          style={style}
-          sx={{
-            px: 1,
-            display: "flex",
-            alignItems: "center",
-            bgcolor: isPreview ? "rgba(0,0,200,0.08)" : "transparent",
-            "&:hover": { bgcolor: "rgba(0,0,0,0.04)" },
-          }}
-          onClick={() => onPreview(f)}
-        >
-          <ListItemIcon sx={{ minWidth: 32 }}>
-            <Checkbox
-              disableRipple
-              edge="start"
-              size="small"
-              checked={checked}
-              onClick={(e) => e.stopPropagation()}
-              onChange={(e) => onToggle(f, e.target.checked)}
-            />
-          </ListItemIcon>
-          <ListItemText
-            primary={f}
-            sx={{
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              cursor: "pointer",
-            }}
-          />
+        <Box style={style} sx={{ p: 0.5 }}>
+          <Tooltip title={f} placement="top" enterDelay={1000}>
+            <Box
+              onClick={handleInteraction}
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                height: "100%",
+                width: "100%",
+                cursor: "pointer",
+                borderRadius: 1.5,
+                border: 2,
+                borderColor: isCurrent ? "primary.main" : "transparent",
+                bgcolor: getBackgroundColor(),
+                "&:hover": {
+                  borderColor: isCurrent ? "primary.dark" : "divider",
+                  backgroundColor: isSelected
+                    ? `${theme.palette.primary.main}60`
+                    : "action.hover",
+                },
+                transition: "background-color 150ms, border-color 150ms",
+              }}
+            >
+              <ListItemText
+                primary={f}
+                primaryTypographyProps={{
+                  sx: {
+                    px: 1.5,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    fontWeight: isSelected ? "700" : "400",
+                    color: isSelected ? "text.primary" : "text.secondary",
+                  },
+                }}
+              />
+              {isCurrent && <AutoAwesomeIcon color="primary" sx={{ mr: 1 }} />}
+            </Box>
+          </Tooltip>
         </Box>
       );
     },
-    // custom comparator: only re-render if this cell’s own checked changed
+    // --- NEW: Updated comparator to track all relevant state changes ---
     (prev, next) => {
       const idx = prev.rowIndex * prev.data.cols + prev.columnIndex;
+      if (idx >= prev.data.files.length || idx >= next.data.files.length)
+        return false;
       const f = prev.data.files[idx];
-      const prevChecked = prev.data.selectedSet.has(f);
-      const nextChecked = next.data.selectedSet.has(f);
-      return prevChecked === nextChecked;
+      const prevSelected = prev.data.selectedSet.has(f);
+      const nextSelected = next.data.selectedSet.has(f);
+      const prevCurrent = prev.data.current === f;
+      const nextCurrent = next.data.current === f;
+
+      return prevSelected === nextSelected && prevCurrent === nextCurrent;
     }
   );
 
@@ -111,10 +148,9 @@ export default function VirtualFileGrid({
       columnCount={cols}
       rowCount={rows}
       overscanRowCount={5}
-      itemData={itemData} // inject our data into every Cell
-      itemKey={
-        ({ columnIndex, rowIndex, data }) =>
-          data.files[rowIndex * data.cols + columnIndex] // stable filename key
+      itemData={itemData}
+      itemKey={({ columnIndex, rowIndex, data }) =>
+        data.files[rowIndex * data.cols + columnIndex]
       }
     >
       {Cell}

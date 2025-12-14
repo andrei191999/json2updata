@@ -16,17 +16,14 @@ Tag,Required CSV while preserving levels:
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 from typing import Iterable, Tuple, List
 
 import openpyxl
 import pandas as pd
 
-ROOT   = Path(__file__).resolve().parent / "resources"
-SRC_XLSX = ROOT / "updata-2.6.14.xlsx"
-DST_CSV  = ROOT / "updata-2.6.14-flat.csv"
+from backend.settings import get_settings
 
+settings = get_settings()
 
 def iter_leaf_rows(ws) -> Iterable[Tuple[str, str]]:
     """Yield (dotted_path, Y|N) for every LEAF element in the worksheet."""
@@ -71,18 +68,18 @@ def iter_leaf_rows(ws) -> Iterable[Tuple[str, str]]:
 
 
 def main() -> None:
-    if not SRC_XLSX.exists():
-        raise SystemExit(f"Spec not found: {SRC_XLSX}")
+    if not settings.SPEC_XLSX.exists():
+        raise SystemExit(f"Spec not found: {settings.SPEC_XLSX}")
 
-    wb = openpyxl.load_workbook(SRC_XLSX, data_only=True)
+    wb = openpyxl.load_workbook(settings.SPEC_XLSX, data_only=True)
     ws = wb.active
     rows = list(iter_leaf_rows(ws))
 
     if not rows:
         raise SystemExit("No leaf rows detected – check sheet layout.")
 
-    pd.DataFrame(rows, columns=["Tag", "Required"]).to_csv(DST_CSV, index=False)
-    print(f"✅  Wrote {DST_CSV.relative_to(ROOT.parent)}  ({len(rows)} rows)")
+    pd.DataFrame(rows, columns=["Tag", "Required"]).to_csv(settings.FLAT_SPEC_CSV, index=False)
+    print(f"✅  Wrote {settings.FLAT_SPEC_CSV.relative_to(settings.PROJECT_ROOT)}  ({len(rows)} rows)")
 
 
 if __name__ == "__main__":

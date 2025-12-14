@@ -1,67 +1,112 @@
 import {
-  Toolbar,
   Button,
   Box,
+  TextField,
+  InputAdornment,
+  ToggleButtonGroup,
+  ToggleButton,
+  Tooltip,
   Typography,
-  Switch,
-  Select,
-  MenuItem,
+  Toolbar,
 } from "@mui/material";
-import { useLayoutEffect, useRef, useState } from "react";
-import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import { useLayoutEffect, useRef, useState, useMemo } from "react";
 import VirtualFileGrid from "./VirtualFileGrid";
 
-/* ──────────────────────────────────────────────────────────────── */
-/* Props – everything except `files` & `currentPreviewFile` is now OPTIONAL */
+// --- Import a rich set of icons ---
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
+import SearchIcon from "@mui/icons-material/Search";
+import DeselectIcon from "@mui/icons-material/Deselect";
+import SelectAllIcon from "@mui/icons-material/SelectAll";
+import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
+import ShutterSpeedIcon from "@mui/icons-material/ShutterSpeed";
+import TuneIcon from "@mui/icons-material/Tune";
+import PsychologyIcon from "@mui/icons-material/Psychology";
+import SaveIcon from "@mui/icons-material/Save";
+import FileCopyIcon from "@mui/icons-material/FileCopy";
+import ArchiveIcon from "@mui/icons-material/Archive";
+
+// --- Helper component for displaying folder paths ---
+const PathDisplay = ({
+  label,
+  handle,
+}: {
+  label: string;
+  handle: FileSystemDirectoryHandle | null;
+}) => {
+  let displayText = label;
+  if (handle) {
+    displayText = handle.name;
+  }
+
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+      {label === "Input" ? <FolderOpenIcon /> : <CreateNewFolderIcon />}
+      <Typography variant="body2" noWrap>
+        {displayText}
+      </Typography>
+    </Box>
+  );
+};
+
 interface Props {
   files: string[];
   currentPreviewFile: string | null;
 
   /* toggles */
-  keep?: boolean;
-  level?: "fast" | "normal" | "deep";
-
-  onToggleKeep: (checked: boolean) => void;
-  onLevel?: (lv: "fast" | "normal" | "deep") => void;
-
-  /* batch-mode (optional) */
-  selectedSet?: Set<string>;
-  onToggleFile?: (fname: string, isChecked: boolean) => void;
-
-  /* callbacks */
+  keep: boolean;
+  level: "fast" | "normal" | "deep";
+  packageOn: boolean;
+  zipPair: boolean;
+  onToggleKeep: (val: boolean) => void;
+  onLevel: (lv: "fast" | "normal" | "deep") => void;
+  onTogglePackage: (val: boolean) => void;
+  onToggleZip: (val: boolean) => void;
+  selectedSet: Set<string>;
+  onToggleFileSelection: (fname: string) => void;
   onPreviewFile: (fname: string) => void;
   onPickDir: () => void;
   onPickOutFolder: () => void;
-
   selectAll: (all: string[]) => void;
   clearAll: () => void;
   onBatch: () => void;
-}
-
-/* Extend Window interface for FS Access API */
-declare global {
-  interface Window {
-    showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle>;
-  }
+  batchDisabled?: boolean;
+  inputHandle: FileSystemDirectoryHandle | null;
+  outputHandle: FileSystemDirectoryHandle | null;
 }
 
 export default function FilePane({
   files,
   currentPreviewFile,
-  keep = false,
-  level = "normal",
-  onToggleKeep = () => {},
-  onLevel = () => {},
-  onToggleFile = () => {},
+  keep,
+  level,
+  onToggleKeep,
+  onLevel,
   onPreviewFile,
-  selectedSet = new Set<string>(),
-  onPickDir = () => {},
-  onPickOutFolder = () => {},
+  onToggleFileSelection,
+  selectedSet,
+  onPickDir,
+  onPickOutFolder,
   selectAll,
-  clearAll = () => {},
-  onBatch = () => {},
+  clearAll,
+  onBatch,
+  batchDisabled,
+  packageOn,
+  onTogglePackage,
+  zipPair,
+  onToggleZip,
+  inputHandle,
+  outputHandle,
 }: Props) {
-  const handleToggle = onToggleFile;
+  /* ─── NEW: Search state and filtering ────────────────────────── */
+  const [query, setQuery] = useState("");
+  const filteredFiles = useMemo(
+    () => files.filter((f) => f.toLowerCase().includes(query.toLowerCase())),
+    [files, query]
+  );
+
+  const handleSelectAll = () => selectAll(filteredFiles);
+
   /* ── measure container size so grid is responsive ─────────────── */
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 });
@@ -75,80 +120,170 @@ export default function FilePane({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  /* ─── render ──────────────────────────────────────────────────── */
+
+  const selectedStyle = (isSelected: boolean) =>
+    isSelected
+      ? {
+          color: "primary.contrastText",
+          bgcolor: "primary.main",
+          "&:hover": { bgcolor: "primary.dark" },
+        }
+      : {};
+
   return (
-    <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <Toolbar variant="dense" sx={{ minHeight: 34, px: 1 }}>
-        <Button startIcon={<FolderOpenIcon />} size="small" onClick={onPickDir}>
-          Choose Folder
+    // CHANGE: Added a wrapper to ensure proper sizing within the Split pane
+    <Box
+      sx={{
+        height: "100%",
+        width: "100%",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        gap: 1.5,
+        p: 1.5,
+      }}
+    >
+      {/* --- NEW: Top toolbar with folder selectors and main toggles --- */}
+      <Toolbar
+        disableGutters
+        variant="dense"
+        sx={{ border: 1, borderColor: "divider", borderRadius: 2, p: 1 }}
+      >
+        <Button variant="outlined" onClick={onPickDir} sx={{ flexShrink: 0 }}>
+          <PathDisplay label="Input" handle={inputHandle} />
         </Button>
 
-        <Button onClick={onPickOutFolder}>Output folder…</Button>
-
-        <Button size="small" onClick={() => selectAll(files)}>
-          Select all files
-        </Button>
-        <Button size="small" onClick={clearAll}>
-          None
-        </Button>
-
-        {/* NEW – Batch transform */}
         <Button
-          size="small"
-          variant="contained"
-          sx={{ ml: "auto" }}
-          disabled={selectedSet.size === 0}
-          onClick={onBatch}
+          variant="outlined"
+          onClick={onPickOutFolder}
+          sx={{ flexShrink: 0 }}
         >
-          Transform ({selectedSet.size})
+          <PathDisplay label="Output" handle={outputHandle} />
         </Button>
-
-        <Select
-          size="small"
-          value={level}
-          onChange={(e) => onLevel?.(e.target.value as any)}
-          sx={{ mx: 1, minWidth: 90 }}
+        <Box
+          sx={{
+            flex: 1,
+            display: "flex",
+            justifyContent: "center",
+            gap: 1,
+            px: 2,
+          }}
         >
-          <MenuItem value="fast">Fast</MenuItem>
-          <MenuItem value="normal">Normal</MenuItem>
-          <MenuItem value="deep">Deep</MenuItem>
-        </Select>
-
-        <Switch
-          checked={keep}
-          onChange={(e) => onToggleKeep(e.target.checked)}
-          size="small"
-          sx={{ ml: 1 }}
-        />
-        <Typography variant="caption" sx={{ ml: 0.5 }}>
-          Keep mappings
-        </Typography>
+          <ToggleButton
+            value="keep"
+            selected={keep}
+            onChange={() => onToggleKeep(!keep)}
+            size="small"
+            sx={selectedStyle(keep)}
+          >
+            <SaveIcon sx={{ mr: 1 }} /> Keep
+          </ToggleButton>
+          <ToggleButton
+            value="pdf"
+            selected={packageOn}
+            onChange={() => onTogglePackage(!packageOn)}
+            size="small"
+            sx={selectedStyle(packageOn)}
+          >
+            <FileCopyIcon sx={{ mr: 1 }} /> PDF
+          </ToggleButton>
+          <ToggleButton
+            value="zip"
+            selected={zipPair}
+            disabled={!packageOn}
+            onChange={() => onToggleZip(!zipPair)}
+            size="small"
+            sx={selectedStyle(zipPair)}
+          >
+            <ArchiveIcon sx={{ mr: 1 }} /> ZIP
+          </ToggleButton>
+          <Box
+            sx={{
+              borderLeft: 1,
+              borderColor: "divider",
+              mx: 1,
+              alignSelf: "stretch",
+            }}
+          />
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={level}
+            onChange={(e, val) => val && onLevel(val)}
+          >
+            <Tooltip title="Fast">
+              <ToggleButton value="fast">
+                <ShutterSpeedIcon />
+              </ToggleButton>
+            </Tooltip>
+            <Tooltip title="Normal">
+              <ToggleButton value="normal">
+                <TuneIcon />
+              </ToggleButton>
+            </Tooltip>
+            <Tooltip title="Deep">
+              <ToggleButton value="deep">
+                <PsychologyIcon />
+              </ToggleButton>
+            </Tooltip>
+          </ToggleButtonGroup>
+        </Box>
       </Toolbar>
 
-      <Typography
-        variant="caption"
-        sx={{ px: 1, pt: 0.5, color: "gray", fontStyle: "italic" }}
-      >
-        (Check multiple for batch, click name to preview)
-      </Typography>
+      <Box sx={{ display: "flex", gap: 1, alignItems: "left" }}>
+        <TextField
+          size="small"
+          placeholder="Search files..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon />
+              </InputAdornment>
+            ),
+          }}
+        />
+
+        <Box sx={{ display: "flex", gap: 1, alignItems: "left" }}>
+          <Button onClick={clearAll} variant="outlined" size="small">
+            <DeselectIcon sx={{ mr: 0.5 }} /> None
+          </Button>
+          <Button onClick={handleSelectAll} variant="outlined" size="small">
+            <SelectAllIcon sx={{ mr: 0.5 }} /> All
+          </Button>
+          <Button
+            variant="contained"
+            color="secondary"
+            disabled={selectedSet.size === 0 || batchDisabled}
+            onClick={onBatch}
+            startIcon={<RocketLaunchIcon />}
+          >
+            Transform {selectedSet.size} / {filteredFiles.length}
+          </Button>
+        </Box>
+      </Box>
 
       <Box
         sx={{
           flex: 1,
           overflow: "hidden",
           position: "relative",
+          border: 1,
+          borderColor: "divider",
+          borderRadius: 2,
         }}
         ref={boxRef}
       >
         {boxSize.h > 0 && (
           <VirtualFileGrid
-            files={files}
+            files={filteredFiles}
             height={boxSize.h}
             width={boxSize.w}
             current={currentPreviewFile}
             selectedSet={selectedSet}
-            onToggle={handleToggle}
             onPreview={onPreviewFile}
+            onToggleSelection={onToggleFileSelection}
           />
         )}
       </Box>

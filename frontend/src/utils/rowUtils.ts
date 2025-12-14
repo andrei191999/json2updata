@@ -1,29 +1,53 @@
-import type { GridRowParams, GridValueGetter } from "@mui/x-data-grid";
+import type { GridRowClassNameParams } from "@mui/x-data-grid";
 import type { MappingRow } from "../types/mapping";
 import type { Cat } from "../components/CategoryFilterSelect";
-import { debug } from "./debug"; // same folder → “./debug”
 
-/* Human-readable mapping for tooltip text */
+/**
+ * Human-readable mapping for tooltip text.
+ */
 export const catName: Record<Cat, string> = {
-  M: "Required",
+  M: "Mandatory",
   C: "Conditional",
-  O: "Optional",
-  P: "Parent",
+  P: "Parent / Structural",
+  O: "Optional / Guessed",
 };
 
-/* Cheap helper → M / C / O / P code used by the Cat column */
-export const catGetter: GridValueGetter<MappingRow, Cat> = (_v, row) => {
-  if (row.category.startsWith("required")) return "M";
-  if (row.category.startsWith("conditional")) return "C";
-  if (row.category.startsWith("parent")) return "P";
+/**
+ * Determines the category code (M/C/P/O) for a given row.
+ * This version uses the older (value, row) signature but with corrected logic.
+ */
+export const catGetter = (_value: any, row: MappingRow): Cat => {
+  const category = row.category;
+
+  if (!category) return "O";
+
+  if (category === "required" || category === "parent-required") {
+    return "M";
+  }
+  if (category === "conditional") {
+    return "C";
+  }
+  if (category === "parent-optional" || category === "filename") {
+    return "P";
+  }
   return "O";
 };
 
-/* Row CSS class — used by DataGrid “getRowClassName” prop */
-export function getRowClassName(p: GridRowParams<MappingRow>): string {
-  if (p.row.category === "filename") return "row-filename";
-  const warn = p.row.warning ? " row-warning" : "";
-  return `row-${p.row.category}${warn}`;
-}
+/**
+ * Applies a specific CSS class to a row based on its properties.
+ */
+export function getRowClassName(
+  params: GridRowClassNameParams<MappingRow>
+): string {
+  const row = params.row;
+  const classNames = [`row-${row.category}`]; // Base class like "row-required"
 
-debug("[rowUtils] module initialised");
+  if (row.touched) {
+    classNames.push("row-touched");
+  }
+  if (row.warning) {
+    classNames.push("row-warning");
+  }
+
+  return classNames.join(" "); // e.g., "row-required row-touched"
+}

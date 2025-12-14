@@ -10,7 +10,10 @@ export type RowCategory =
   | "parent-required" // parent with required tags
   | "parent-optional"; // parent with optional tags
 
+export type RowMode = "pick" | "hard" | "real" | "alias";
+
 export interface MappingRow {
+  preview: string;
   /** stable row id = CSV order; meta rows use fractional ids (89.001, 89.002, …) */
   id: number;
   /** canonical Updata tag, or "meta:doc:foo", or "+  Add metadata (Document)" */
@@ -27,8 +30,10 @@ export interface MappingRow {
   /** show ⚠️ when jsonKey ≠ "" but missing in the current JSON */
   warning: boolean | undefined;
   category: RowCategory;
-  mode?: "pick" | "hard" | "real";
+  mode?: RowMode;
+  aliasFor?: string;
   xform?: TransformChain;
+  depth?: number; // for indentation level
 }
 
 /** what we store in mappingCache[fileName] */
@@ -37,8 +42,10 @@ export interface Override {
   value: string;
   include: boolean;
   /** "pick" | "hard" | "real"  (how jsonKey was chosen) */
-  mode: "pick" | "hard" | "real";
+  mode: RowMode;
+  aliasFor?: string;
   xform?: TransformChain;
+  depth?: number; // for indentation level
 }
 
 /** mappingCache = { [fileName]: { [updataTag]: Override } } */

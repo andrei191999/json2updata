@@ -21,6 +21,7 @@ interface Props {
   suggest: Record<string, Array<[string, number]>>;
   json: Record<string, unknown>;
   onEdit: (tag: string, patch: Override, touchTemplate?: boolean) => void;
+  tagList: string[];
 }
 
 /**
@@ -33,12 +34,13 @@ function MappingTableBase({
   suggest,
   json,
   onEdit,
+  tagList,
 }: Props) {
   /* ─── JSON keys memo ─────────────────────────────────────────────── */
   const jsonKeys = useMemo(() => collectJsonKeys(json), [json]);
 
   /* ─── Category filter (M/C/O/P) ──────────────────────────────────── */
-  const [selectedCats, setSelectedCats] = useState<Cat[]>([]);
+  const [selectedCats, setSelectedCats] = useState<Cat[]>(["M", "C", "P"]);
   const visibleRows = useCategoryFilter(rows, selectedCats);
 
   /* ─── Bulk include / exclude for the *visible* subset ────────────── */
@@ -103,6 +105,7 @@ function MappingTableBase({
         onEdit,
         visibleRows,
         openEditor,
+        tagList,
       }),
     [
       selectedCats,
@@ -114,6 +117,7 @@ function MappingTableBase({
       onEdit,
       visibleRows,
       openEditor,
+      tagList,
     ]
   );
 
@@ -128,14 +132,27 @@ function MappingTableBase({
 
   /* ─── The DataGrid itself ───────────────────────────────────────── */
   return (
-    <Box sx={{ height: "100%", width: "100%", overflow: "auto" }}>
+    <Box sx={{ height: "100%", width: "100%", overflow: "auto", minWidth: 0 }}>
       <DataGrid
         rows={visibleRows}
         columns={columns}
         getRowId={(r: MappingRow) => `${r.tag}::${r.id}`}
         editMode="cell"
         density="compact"
-        sx={{ height: "100%", width: "100%" }}
+        sx={{
+          height: "100%",
+          width: "100%",
+          minWidth: 0,
+          // make long content wrap instead of forcing huge width:
+          "& .MuiDataGrid-cell": {
+            whiteSpace: "normal",
+            wordBreak: "break-word",
+            lineHeight: "1.25",
+          },
+          // also keep headers from forcing width:
+          "& .MuiDataGrid-columnHeaders": { minWidth: 0 },
+          "& .MuiDataGrid-virtualScrollerContent": { minWidth: 0 },
+        }}
         getRowClassName={getRowClassName as (params: any) => string}
       />
 
